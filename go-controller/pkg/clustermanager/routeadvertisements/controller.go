@@ -336,6 +336,8 @@ type selectedNetworks struct {
 
 // vrfConfig holds base VRF EVPN configuration for a network
 type vrfConfig struct {
+	// NetworkName is the name of the network this config belongs to
+	NetworkName string
 	// VNI is the VXLAN Network Identifier
 	VNI int32
 	// RouteTarget is the BGP route target, empty means use FRR defaults
@@ -345,8 +347,6 @@ type vrfConfig struct {
 // ipVRFConfig holds IP-VRF EVPN configuration for a network
 type ipVRFConfig struct {
 	vrfConfig
-	// NetworkName is the name of the network this config belongs to
-	NetworkName string
 	// VRFName is the Linux VRF name
 	VRFName string
 	// HasIPv4 indicates if the network has IPv4 subnets
@@ -420,6 +420,7 @@ func (c *Controller) generateFRRConfigurations(ra *ratypes.RouteAdvertisements) 
 		// MAC-VRF configuration
 		if macVNI := network.EVPNMACVRFVNI(); macVNI > 0 {
 			selectedNetworks.macVRFConfigs = append(selectedNetworks.macVRFConfigs, &vrfConfig{
+				NetworkName: networkName,
 				VNI:         macVNI,
 				RouteTarget: network.EVPNMACVRFRouteTarget(),
 			})
@@ -438,13 +439,13 @@ func (c *Controller) generateFRRConfigurations(ra *ratypes.RouteAdvertisements) 
 			}
 			selectedNetworks.ipVRFConfigs = append(selectedNetworks.ipVRFConfigs, &ipVRFConfig{
 				vrfConfig: vrfConfig{
+					NetworkName: networkName,
 					VNI:         ipVNI,
 					RouteTarget: network.EVPNIPVRFRouteTarget(),
 				},
-				NetworkName: networkName,
-				VRFName:     vrf,
-				HasIPv4:     hasIPv4,
-				HasIPv6:     hasIPv6,
+				VRFName: vrf,
+				HasIPv4: hasIPv4,
+				HasIPv6: hasIPv6,
 			})
 		}
 		hasEVPNConfig := network.EVPNMACVRFVNI() > 0 || network.EVPNIPVRFVNI() > 0
@@ -920,6 +921,20 @@ func (c *Controller) generateFRRConfiguration(
 				VRF:      cfg.VRFName,
 				Prefixes: selectedNetworks.hostNetworkSubnets[cfg.NetworkName],
 			})
+		}
+	}
+
+	// MAC-VRF only EVPN networks with targetVRF == "auto" are handled
+	// by the global router's EVPN raw config (advertise-all-vni) rather
+	// than by a VRF-specific router. Mark them as matched when a global
+	// router with neighbors is present.
+	if ra.Spec.TargetVRF == "auto" && globalRouterASN > 0 && len(neighbors) > 0 {
+		for _, cfg := range selectedNetworks.macVRFConfigs {
+			if !slices.ContainsFunc(selectedNetworks.ipVRFConfigs, func(ip *ipVRFConfig) bool {
+				return ip.NetworkName == cfg.NetworkName
+			}) {
+				matchedNetworks.Insert(cfg.NetworkName)
+			}
 		}
 	}
 
