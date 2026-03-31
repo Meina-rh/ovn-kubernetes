@@ -19,6 +19,7 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -28,19 +29,18 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
 	utiliptables "k8s.io/kubernetes/pkg/util/iptables"
-	kexec "k8s.io/utils/exec"
 	utilnet "k8s.io/utils/net"
 
-	ovnconfig "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	egressipv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
-	egressipfake "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/clientset/versioned/fake"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	ovnkube "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
-	ovniptables "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/iptables"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/linkmanager"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/routemanager"
-	ovntest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	ovnconfig "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	egressipv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
+	egressipfake "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/clientset/versioned/fake"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	ovnkube "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/kube"
+	ovniptables "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/iptables"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/linkmanager"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/routemanager"
+	ovntest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 // testPodConfig holds all the information needed to validate a config is applied for a pod
@@ -169,8 +169,8 @@ func setupFakeNode(nodeInitialConfig nodeConfig) (ns.NetNS, error) {
 			}
 		}
 		// adding IPTable rules
-		ipTableV4Client := utiliptables.New(kexec.New(), utiliptables.ProtocolIPv4)
-		ipTableV6Client := utiliptables.New(kexec.New(), utiliptables.ProtocolIPv6)
+		ipTableV4Client := utiliptables.New(utiliptables.ProtocolIPv4)
+		ipTableV6Client := utiliptables.New(utiliptables.ProtocolIPv6)
 		var ipTableClient utiliptables.Interface
 		for _, iptableRule := range nodeInitialConfig.iptableRules {
 			if len(iptableRule.Args) != 0 {
@@ -1133,7 +1133,7 @@ var _ = ginkgo.Describe("VRF", func() {
 		ginkgo.By("create VRF and add link")
 		gomega.Expect(createVRFAndEnslaveLink(testNS, dummyLink1Name, vrfName, vrfTable)).Should(gomega.Succeed())
 		ginkgo.By("add route to routing table associated with VRF")
-		vrfRoute := getDstRouteForTable(getLinkIndex(dummyLink1Name), int(vrfTable), dummy3IPv4CIDR)
+		vrfRoute := getV4DstRouteForTable(getLinkIndex(dummyLink1Name), int(vrfTable), dummy3IPv4CIDR)
 		gomega.Expect(testNS.Do(func(ns.NetNS) error {
 			return netlink.RouteAdd(&vrfRoute)
 		})).Should(gomega.Succeed())
@@ -1642,31 +1642,49 @@ func isIPTableRuleArgIPV6(ruleArgs []string) bool {
 	panic("unable to determine IP version of IPTable rule")
 }
 
+// For any IPV4 or IPV6 route, default type is unicast if not mentioned explicitly
+// Ref: https://www.man7.org/linux/man-pages/man8/ip-route.8.html
 func getDefaultIPv4Route(linkIndex int) netlink.Route {
 	// dst is nil because netlink represents a default route as nil
-	return netlink.Route{LinkIndex: linkIndex, Table: util.CalculateRouteTableID(linkIndex), Dst: defaultV4AnyCIDR}
+	return netlink.Route{LinkIndex: linkIndex, Table: util.CalculateRouteTableID(linkIndex), Dst: defaultV4AnyCIDR, Type: unix.RTN_UNICAST}
 }
 
 func getDefaultIPv6Route(linkIndex int) netlink.Route {
 	// dst is nil because netlink represents a default route as nil
-	return netlink.Route{LinkIndex: linkIndex, Table: util.CalculateRouteTableID(linkIndex), Dst: defaultV6AnyCIDR}
+	// Priority for a default IPv6 route gets set to 1024
+	// Ref : https://access.redhat.com/solutions/3659171
+	return netlink.Route{LinkIndex: linkIndex, Table: util.CalculateRouteTableID(linkIndex), Dst: defaultV6AnyCIDR, Type: unix.RTN_UNICAST, Priority: 1024}
 }
 
 func getDstRoute(linkIndex int, dst string) netlink.Route {
-	return getDstRouteForTable(linkIndex, util.CalculateRouteTableID(linkIndex), dst)
+	if utilnet.IsIPv6CIDRString(dst) {
+		return getV6DstRouteForTable(linkIndex, util.CalculateRouteTableID(linkIndex), dst)
+	} else {
+		return getV4DstRouteForTable(linkIndex, util.CalculateRouteTableID(linkIndex), dst)
+	}
 
 }
 
-func getDstRouteForTable(linkIndex, table int, dst string) netlink.Route {
+// Default scope is link for direct unicast routes
+// Ref: https://www.man7.org/linux/man-pages/man8/ip-route.8.html
+func getV4DstRouteForTable(linkIndex, table int, dst string) netlink.Route {
 	_, dstIPNet, err := net.ParseCIDR(dst)
 	if err != nil {
 		panic(err.Error())
 	}
-	return netlink.Route{LinkIndex: linkIndex, Dst: dstIPNet, Table: table}
+	return netlink.Route{LinkIndex: linkIndex, Dst: dstIPNet, Table: table, Type: unix.RTN_UNICAST, Scope: netlink.SCOPE_LINK}
+}
+
+func getV6DstRouteForTable(linkIndex, table int, dst string) netlink.Route {
+	_, dstIPNet, err := net.ParseCIDR(dst)
+	if err != nil {
+		panic(err.Error())
+	}
+	return netlink.Route{LinkIndex: linkIndex, Dst: dstIPNet, Table: table, Type: unix.RTN_UNICAST, Priority: 256}
 }
 
 func getLinkLocalRoute(linkIndex int) netlink.Route {
-	return netlink.Route{LinkIndex: linkIndex, Dst: linkLocalCIDR, Table: util.CalculateRouteTableID(linkIndex)}
+	return netlink.Route{LinkIndex: linkIndex, Dst: linkLocalCIDR, Table: util.CalculateRouteTableID(linkIndex), Type: unix.RTN_UNICAST, Priority: 256}
 }
 
 func getNetlinkAddr(ip, netmask string) *netlink.Addr {
@@ -1680,10 +1698,21 @@ func getNetlinkAddr(ip, netmask string) *netlink.Addr {
 // containsRoutes returns true if routes in routes1 are presents in routes routes2
 func containsRoutes(routes1 []netlink.Route, routes2 []netlink.Route) bool {
 	var found bool
+	eq := func(route1, route2 netlink.Route) bool {
+		// normalize fields that we don't set explicitly and just get set once
+		// the route is installed
+		if route1.Family == netlink.FAMILY_ALL {
+			route1.Family = route2.Family
+		}
+		if route1.Protocol == unix.RTPROT_UNSPEC {
+			route1.Protocol = route2.Protocol
+		}
+		return util.RouteEqual(&route1, &route2)
+	}
 	for _, route1 := range routes1 {
 		found = false
 		for _, route2 := range routes2 {
-			if routemanager.RoutePartiallyEqual(route1, route2) {
+			if eq(route1, route2) {
 				found = true
 				break
 			}
@@ -1805,3 +1834,113 @@ func getEIPIPVersions(eip *egressipv1.EgressIP) (bool, bool) {
 	}
 	return v4, v6
 }
+
+var _ = ginkgo.Describe("isEgressIPOnLink", func() {
+	ginkgo.It("returns false when link does not exist", func() {
+		defer ginkgo.GinkgoRecover()
+		if ovntest.NoRoot() {
+			ginkgo.Skip("Test requires root privileges")
+		}
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+
+		// Use a non-existent link index
+		nonExistentLinkIndex := 99999
+		assignedEIPs := sets.New[string]("192.168.1.100")
+
+		// Create a test namespace to ensure we're in a clean network environment
+		testNS, err := testutils.NewNS()
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		defer func() {
+			gomega.Expect(testNS.Close()).Should(gomega.Succeed())
+			gomega.Expect(testutils.UnmountNS(testNS)).Should(gomega.Succeed())
+		}()
+
+		err = testNS.Do(func(ns.NetNS) error {
+			// Call isEgressIPOnLink with a non-existent link index
+			// This should return false, nil instead of an error
+			result, err := isEgressIPOnLink(nonExistentLinkIndex, netlink.FAMILY_V4, assignedEIPs)
+			if err != nil {
+				return fmt.Errorf("isEgressIPOnLink should not return error for non-existent link, got: %v", err)
+			}
+			if result {
+				return fmt.Errorf("isEgressIPOnLink should return false for non-existent link")
+			}
+			return nil
+		})
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	})
+
+	ginkgo.It("returns true when EgressIP is on link", func() {
+		defer ginkgo.GinkgoRecover()
+		if ovntest.NoRoot() {
+			ginkgo.Skip("Test requires root privileges")
+		}
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+
+		testNS, cleanupFn, err := setupFakeTestNode(nodeConfig{
+			linkConfigs: []linkConfig{
+				{dummyLink1Name, []address{{dummy1IPv4CIDR, false}, {egressIP1IPV4CIDR, true}}},
+			},
+		})
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		defer func() {
+			gomega.Expect(cleanupFn()).Should(gomega.Succeed())
+		}()
+
+		err = testNS.Do(func(ns.NetNS) error {
+			link, err := netlink.LinkByName(dummyLink1Name)
+			if err != nil {
+				return err
+			}
+			assignedEIPs := sets.New[string](egressIP1IPV4)
+			result, err := isEgressIPOnLink(link.Attrs().Index, netlink.FAMILY_V4, assignedEIPs)
+			if err != nil {
+				return fmt.Errorf("isEgressIPOnLink should not return error: %v", err)
+			}
+			if !result {
+				return fmt.Errorf("isEgressIPOnLink should return true when EgressIP is on link")
+			}
+			return nil
+		})
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	})
+
+	ginkgo.It("returns false when no EgressIP is on link", func() {
+		defer ginkgo.GinkgoRecover()
+		if ovntest.NoRoot() {
+			ginkgo.Skip("Test requires root privileges")
+		}
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+
+		testNS, cleanupFn, err := setupFakeTestNode(nodeConfig{
+			linkConfigs: []linkConfig{
+				{dummyLink1Name, []address{{dummy1IPv4CIDR, false}}},
+			},
+		})
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		defer func() {
+			gomega.Expect(cleanupFn()).Should(gomega.Succeed())
+		}()
+
+		err = testNS.Do(func(ns.NetNS) error {
+			link, err := netlink.LinkByName(dummyLink1Name)
+			if err != nil {
+				return err
+			}
+			// Use an EgressIP that is NOT on the link
+			assignedEIPs := sets.New[string](egressIP1IPV4)
+			result, err := isEgressIPOnLink(link.Attrs().Index, netlink.FAMILY_V4, assignedEIPs)
+			if err != nil {
+				return fmt.Errorf("isEgressIPOnLink should not return error: %v", err)
+			}
+			if result {
+				return fmt.Errorf("isEgressIPOnLink should return false when EgressIP is not on link")
+			}
+			return nil
+		})
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	})
+})

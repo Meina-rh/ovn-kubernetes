@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"net"
 
-	libovsdbclient "github.com/ovn-org/libovsdb/client"
+	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
 
-	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 type GatewayTopologyFactory struct {
@@ -36,8 +36,18 @@ func (gtf *GatewayTopologyFactory) NewClusterRouterWithMulticastSupport(
 	netInfo util.NetInfo,
 	coopUUID string,
 ) (*nbdb.LogicalRouter, error) {
-	routerOptions := map[string]string{"mcast_relay": "true"}
+	routerOptions := map[string]string{"mcast_relay": "true", "always_learn_from_arp_request": "false"}
 	return gtf.newClusterRouter(clusterRouterName, netInfo, coopUUID, routerOptions)
+}
+
+func (gtf *GatewayTopologyFactory) NewTransitRouter(
+	transitRouterName string,
+	netInfo util.NetInfo,
+	coopUUID string,
+	tunnelKey string,
+) (*nbdb.LogicalRouter, error) {
+	routerOptions := map[string]string{libovsdbops.RequestedTnlKey: tunnelKey}
+	return gtf.newClusterRouter(transitRouterName, netInfo, coopUUID, routerOptions)
 }
 
 func (gtf *GatewayTopologyFactory) newClusterRouter(
@@ -55,7 +65,7 @@ func (gtf *GatewayTopologyFactory) newClusterRouter(
 		Options: routerOptions,
 		Copp:    &coopUUID,
 	}
-	if netInfo.IsSecondary() {
+	if netInfo.IsUserDefinedNetwork() {
 		logicalRouter.ExternalIDs[types.NetworkExternalID] = netInfo.GetNetworkName()
 		logicalRouter.ExternalIDs[types.TopologyExternalID] = netInfo.TopologyType()
 	}
@@ -84,7 +94,7 @@ func (gtf *GatewayTopologyFactory) NewJoinSwitch(
 	logicalSwitch := nbdb.LogicalSwitch{
 		Name: joinSwitchName,
 	}
-	if netInfo.IsSecondary() {
+	if netInfo.IsUserDefinedNetwork() {
 		logicalSwitch.ExternalIDs = map[string]string{
 			types.NetworkExternalID:  netInfo.GetNetworkName(),
 			types.TopologyExternalID: netInfo.TopologyType(),
@@ -111,7 +121,7 @@ func (gtf *GatewayTopologyFactory) NewJoinSwitch(
 		MAC:      gwLRPMAC.String(),
 		Networks: gwLRPNetworks,
 	}
-	if netInfo.IsSecondary() {
+	if netInfo.IsUserDefinedNetwork() {
 		logicalRouterPort.ExternalIDs = map[string]string{
 			types.NetworkExternalID:  netInfo.GetNetworkName(),
 			types.TopologyExternalID: netInfo.TopologyType(),
@@ -130,7 +140,7 @@ func (gtf *GatewayTopologyFactory) NewJoinSwitch(
 		Name: drSwitchPort,
 		Type: "router",
 		Options: map[string]string{
-			"router-port": drRouterPort,
+			libovsdbops.RouterPort: drRouterPort,
 		},
 		Addresses: []string{"router"},
 	}

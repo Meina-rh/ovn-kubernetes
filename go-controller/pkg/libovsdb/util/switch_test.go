@@ -5,11 +5,11 @@ import (
 	"net"
 	"testing"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
-	libovsdbtest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/libovsdb"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	ovnutil "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	libovsdbtest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing/libovsdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	ovnutil "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 func TestUpdateNodeSwitchExcludeIPs(t *testing.T) {
@@ -268,12 +268,12 @@ func TestUpdateNodeSwitchExcludeIPs(t *testing.T) {
 			var e error
 			if tc.setCfgHybridOvlyEnabled {
 				config.HybridOverlay.Enabled = true
-				if e = UpdateNodeSwitchExcludeIPs(nbClient, ovnutil.GetK8sMgmtIntfName(nodeName), nodeName, nodeName, ipnet); e != nil {
+				if e = UpdateNodeSwitchExcludeIPs(nbClient, ovnutil.GetK8sMgmtIntfName(nodeName), nodeName, nodeName, ipnet, ovnutil.GetNodeManagementIfAddr(ipnet)); e != nil {
 					t.Fatal(fmt.Errorf("failed to update NodeSwitchExcludeIPs with Hybrid Overlay enabled err: %v", e))
 				}
 				config.HybridOverlay.Enabled = false
 			} else {
-				if e = UpdateNodeSwitchExcludeIPs(nbClient, ovnutil.GetK8sMgmtIntfName(nodeName), nodeName, nodeName, ipnet); e != nil {
+				if e = UpdateNodeSwitchExcludeIPs(nbClient, ovnutil.GetK8sMgmtIntfName(nodeName), nodeName, nodeName, ipnet, ovnutil.GetNodeManagementIfAddr(ipnet)); e != nil {
 					t.Fatal(fmt.Errorf("failed to update NodeSwitchExcludeIPs with Hybrid Overlay disabled err: %v", e))
 				}
 

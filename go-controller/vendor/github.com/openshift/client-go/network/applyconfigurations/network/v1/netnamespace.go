@@ -5,23 +5,35 @@ package v1
 import (
 	networkv1 "github.com/openshift/api/network/v1"
 	internal "github.com/openshift/client-go/network/applyconfigurations/internal"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	apismetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
 	managedfields "k8s.io/apimachinery/pkg/util/managedfields"
-	v1 "k8s.io/client-go/applyconfigurations/meta/v1"
+	metav1 "k8s.io/client-go/applyconfigurations/meta/v1"
 )
 
-// NetNamespaceApplyConfiguration represents an declarative configuration of the NetNamespace type for use
+// NetNamespaceApplyConfiguration represents a declarative configuration of the NetNamespace type for use
 // with apply.
+//
+// NetNamespace was used by OpenShift SDN.
+// DEPRECATED: OpenShift SDN is no longer supported and this object is no longer used in
+// any way by OpenShift.
+//
+// Compatibility level 1: Stable within a major release for a minimum of 12 months or 3 minor releases (whichever is longer).
 type NetNamespaceApplyConfiguration struct {
-	v1.TypeMetaApplyConfiguration    `json:",inline"`
-	*v1.ObjectMetaApplyConfiguration `json:"metadata,omitempty"`
-	NetName                          *string                          `json:"netname,omitempty"`
-	NetID                            *uint32                          `json:"netid,omitempty"`
-	EgressIPs                        []networkv1.NetNamespaceEgressIP `json:"egressIPs,omitempty"`
+	metav1.TypeMetaApplyConfiguration `json:",inline"`
+	// metadata is the standard object's metadata.
+	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
+	*metav1.ObjectMetaApplyConfiguration `json:"metadata,omitempty"`
+	// netname is the name of the network namespace. (This is the same as the object's name, but both fields must be set.)
+	NetName *string `json:"netname,omitempty"`
+	// netid is the network identifier of the network namespace assigned to each overlay network packet. This can be manipulated with the "oc adm pod-network" commands.
+	NetID *uint32 `json:"netid,omitempty"`
+	// egressIPs is a list of reserved IPs that will be used as the source for external traffic coming from pods in this namespace.
+	// (If empty, external traffic will be masqueraded to Node IPs.)
+	EgressIPs []networkv1.NetNamespaceEgressIP `json:"egressIPs,omitempty"`
 }
 
-// NetNamespace constructs an declarative configuration of the NetNamespace type for use with
+// NetNamespace constructs a declarative configuration of the NetNamespace type for use with
 // apply.
 func NetNamespace(name string) *NetNamespaceApplyConfiguration {
 	b := &NetNamespaceApplyConfiguration{}
@@ -31,29 +43,14 @@ func NetNamespace(name string) *NetNamespaceApplyConfiguration {
 	return b
 }
 
-// ExtractNetNamespace extracts the applied configuration owned by fieldManager from
-// netNamespace. If no managedFields are found in netNamespace for fieldManager, a
-// NetNamespaceApplyConfiguration is returned with only the Name, Namespace (if applicable),
-// APIVersion and Kind populated. It is possible that no managed fields were found for because other
-// field managers have taken ownership of all the fields previously owned by fieldManager, or because
-// the fieldManager never owned fields any fields.
+// ExtractNetNamespaceFrom extracts the applied configuration owned by fieldManager from
+// netNamespace for the specified subresource. Pass an empty string for subresource to extract
+// the main resource. Common subresources include "status", "scale", etc.
 // netNamespace must be a unmodified NetNamespace API object that was retrieved from the Kubernetes API.
-// ExtractNetNamespace provides a way to perform a extract/modify-in-place/apply workflow.
+// ExtractNetNamespaceFrom provides a way to perform a extract/modify-in-place/apply workflow.
 // Note that an extracted apply configuration will contain fewer fields than what the fieldManager previously
 // applied if another fieldManager has updated or force applied any of the previously applied fields.
-// Experimental!
-func ExtractNetNamespace(netNamespace *networkv1.NetNamespace, fieldManager string) (*NetNamespaceApplyConfiguration, error) {
-	return extractNetNamespace(netNamespace, fieldManager, "")
-}
-
-// ExtractNetNamespaceStatus is the same as ExtractNetNamespace except
-// that it extracts the status subresource applied configuration.
-// Experimental!
-func ExtractNetNamespaceStatus(netNamespace *networkv1.NetNamespace, fieldManager string) (*NetNamespaceApplyConfiguration, error) {
-	return extractNetNamespace(netNamespace, fieldManager, "status")
-}
-
-func extractNetNamespace(netNamespace *networkv1.NetNamespace, fieldManager string, subresource string) (*NetNamespaceApplyConfiguration, error) {
+func ExtractNetNamespaceFrom(netNamespace *networkv1.NetNamespace, fieldManager string, subresource string) (*NetNamespaceApplyConfiguration, error) {
 	b := &NetNamespaceApplyConfiguration{}
 	err := managedfields.ExtractInto(netNamespace, internal.Parser().Type("com.github.openshift.api.network.v1.NetNamespace"), fieldManager, b, subresource)
 	if err != nil {
@@ -66,11 +63,27 @@ func extractNetNamespace(netNamespace *networkv1.NetNamespace, fieldManager stri
 	return b, nil
 }
 
+// ExtractNetNamespace extracts the applied configuration owned by fieldManager from
+// netNamespace. If no managedFields are found in netNamespace for fieldManager, a
+// NetNamespaceApplyConfiguration is returned with only the Name, Namespace (if applicable),
+// APIVersion and Kind populated. It is possible that no managed fields were found for because other
+// field managers have taken ownership of all the fields previously owned by fieldManager, or because
+// the fieldManager never owned fields any fields.
+// netNamespace must be a unmodified NetNamespace API object that was retrieved from the Kubernetes API.
+// ExtractNetNamespace provides a way to perform a extract/modify-in-place/apply workflow.
+// Note that an extracted apply configuration will contain fewer fields than what the fieldManager previously
+// applied if another fieldManager has updated or force applied any of the previously applied fields.
+func ExtractNetNamespace(netNamespace *networkv1.NetNamespace, fieldManager string) (*NetNamespaceApplyConfiguration, error) {
+	return ExtractNetNamespaceFrom(netNamespace, fieldManager, "")
+}
+
+func (b NetNamespaceApplyConfiguration) IsApplyConfiguration() {}
+
 // WithKind sets the Kind field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the Kind field is set to the value of the last call.
 func (b *NetNamespaceApplyConfiguration) WithKind(value string) *NetNamespaceApplyConfiguration {
-	b.Kind = &value
+	b.TypeMetaApplyConfiguration.Kind = &value
 	return b
 }
 
@@ -78,7 +91,7 @@ func (b *NetNamespaceApplyConfiguration) WithKind(value string) *NetNamespaceApp
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the APIVersion field is set to the value of the last call.
 func (b *NetNamespaceApplyConfiguration) WithAPIVersion(value string) *NetNamespaceApplyConfiguration {
-	b.APIVersion = &value
+	b.TypeMetaApplyConfiguration.APIVersion = &value
 	return b
 }
 
@@ -87,7 +100,7 @@ func (b *NetNamespaceApplyConfiguration) WithAPIVersion(value string) *NetNamesp
 // If called multiple times, the Name field is set to the value of the last call.
 func (b *NetNamespaceApplyConfiguration) WithName(value string) *NetNamespaceApplyConfiguration {
 	b.ensureObjectMetaApplyConfigurationExists()
-	b.Name = &value
+	b.ObjectMetaApplyConfiguration.Name = &value
 	return b
 }
 
@@ -96,7 +109,7 @@ func (b *NetNamespaceApplyConfiguration) WithName(value string) *NetNamespaceApp
 // If called multiple times, the GenerateName field is set to the value of the last call.
 func (b *NetNamespaceApplyConfiguration) WithGenerateName(value string) *NetNamespaceApplyConfiguration {
 	b.ensureObjectMetaApplyConfigurationExists()
-	b.GenerateName = &value
+	b.ObjectMetaApplyConfiguration.GenerateName = &value
 	return b
 }
 
@@ -105,7 +118,7 @@ func (b *NetNamespaceApplyConfiguration) WithGenerateName(value string) *NetName
 // If called multiple times, the Namespace field is set to the value of the last call.
 func (b *NetNamespaceApplyConfiguration) WithNamespace(value string) *NetNamespaceApplyConfiguration {
 	b.ensureObjectMetaApplyConfigurationExists()
-	b.Namespace = &value
+	b.ObjectMetaApplyConfiguration.Namespace = &value
 	return b
 }
 
@@ -114,7 +127,7 @@ func (b *NetNamespaceApplyConfiguration) WithNamespace(value string) *NetNamespa
 // If called multiple times, the UID field is set to the value of the last call.
 func (b *NetNamespaceApplyConfiguration) WithUID(value types.UID) *NetNamespaceApplyConfiguration {
 	b.ensureObjectMetaApplyConfigurationExists()
-	b.UID = &value
+	b.ObjectMetaApplyConfiguration.UID = &value
 	return b
 }
 
@@ -123,7 +136,7 @@ func (b *NetNamespaceApplyConfiguration) WithUID(value types.UID) *NetNamespaceA
 // If called multiple times, the ResourceVersion field is set to the value of the last call.
 func (b *NetNamespaceApplyConfiguration) WithResourceVersion(value string) *NetNamespaceApplyConfiguration {
 	b.ensureObjectMetaApplyConfigurationExists()
-	b.ResourceVersion = &value
+	b.ObjectMetaApplyConfiguration.ResourceVersion = &value
 	return b
 }
 
@@ -132,25 +145,25 @@ func (b *NetNamespaceApplyConfiguration) WithResourceVersion(value string) *NetN
 // If called multiple times, the Generation field is set to the value of the last call.
 func (b *NetNamespaceApplyConfiguration) WithGeneration(value int64) *NetNamespaceApplyConfiguration {
 	b.ensureObjectMetaApplyConfigurationExists()
-	b.Generation = &value
+	b.ObjectMetaApplyConfiguration.Generation = &value
 	return b
 }
 
 // WithCreationTimestamp sets the CreationTimestamp field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the CreationTimestamp field is set to the value of the last call.
-func (b *NetNamespaceApplyConfiguration) WithCreationTimestamp(value metav1.Time) *NetNamespaceApplyConfiguration {
+func (b *NetNamespaceApplyConfiguration) WithCreationTimestamp(value apismetav1.Time) *NetNamespaceApplyConfiguration {
 	b.ensureObjectMetaApplyConfigurationExists()
-	b.CreationTimestamp = &value
+	b.ObjectMetaApplyConfiguration.CreationTimestamp = &value
 	return b
 }
 
 // WithDeletionTimestamp sets the DeletionTimestamp field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the DeletionTimestamp field is set to the value of the last call.
-func (b *NetNamespaceApplyConfiguration) WithDeletionTimestamp(value metav1.Time) *NetNamespaceApplyConfiguration {
+func (b *NetNamespaceApplyConfiguration) WithDeletionTimestamp(value apismetav1.Time) *NetNamespaceApplyConfiguration {
 	b.ensureObjectMetaApplyConfigurationExists()
-	b.DeletionTimestamp = &value
+	b.ObjectMetaApplyConfiguration.DeletionTimestamp = &value
 	return b
 }
 
@@ -159,7 +172,7 @@ func (b *NetNamespaceApplyConfiguration) WithDeletionTimestamp(value metav1.Time
 // If called multiple times, the DeletionGracePeriodSeconds field is set to the value of the last call.
 func (b *NetNamespaceApplyConfiguration) WithDeletionGracePeriodSeconds(value int64) *NetNamespaceApplyConfiguration {
 	b.ensureObjectMetaApplyConfigurationExists()
-	b.DeletionGracePeriodSeconds = &value
+	b.ObjectMetaApplyConfiguration.DeletionGracePeriodSeconds = &value
 	return b
 }
 
@@ -169,11 +182,11 @@ func (b *NetNamespaceApplyConfiguration) WithDeletionGracePeriodSeconds(value in
 // overwriting an existing map entries in Labels field with the same key.
 func (b *NetNamespaceApplyConfiguration) WithLabels(entries map[string]string) *NetNamespaceApplyConfiguration {
 	b.ensureObjectMetaApplyConfigurationExists()
-	if b.Labels == nil && len(entries) > 0 {
-		b.Labels = make(map[string]string, len(entries))
+	if b.ObjectMetaApplyConfiguration.Labels == nil && len(entries) > 0 {
+		b.ObjectMetaApplyConfiguration.Labels = make(map[string]string, len(entries))
 	}
 	for k, v := range entries {
-		b.Labels[k] = v
+		b.ObjectMetaApplyConfiguration.Labels[k] = v
 	}
 	return b
 }
@@ -184,11 +197,11 @@ func (b *NetNamespaceApplyConfiguration) WithLabels(entries map[string]string) *
 // overwriting an existing map entries in Annotations field with the same key.
 func (b *NetNamespaceApplyConfiguration) WithAnnotations(entries map[string]string) *NetNamespaceApplyConfiguration {
 	b.ensureObjectMetaApplyConfigurationExists()
-	if b.Annotations == nil && len(entries) > 0 {
-		b.Annotations = make(map[string]string, len(entries))
+	if b.ObjectMetaApplyConfiguration.Annotations == nil && len(entries) > 0 {
+		b.ObjectMetaApplyConfiguration.Annotations = make(map[string]string, len(entries))
 	}
 	for k, v := range entries {
-		b.Annotations[k] = v
+		b.ObjectMetaApplyConfiguration.Annotations[k] = v
 	}
 	return b
 }
@@ -196,13 +209,13 @@ func (b *NetNamespaceApplyConfiguration) WithAnnotations(entries map[string]stri
 // WithOwnerReferences adds the given value to the OwnerReferences field in the declarative configuration
 // and returns the receiver, so that objects can be build by chaining "With" function invocations.
 // If called multiple times, values provided by each call will be appended to the OwnerReferences field.
-func (b *NetNamespaceApplyConfiguration) WithOwnerReferences(values ...*v1.OwnerReferenceApplyConfiguration) *NetNamespaceApplyConfiguration {
+func (b *NetNamespaceApplyConfiguration) WithOwnerReferences(values ...*metav1.OwnerReferenceApplyConfiguration) *NetNamespaceApplyConfiguration {
 	b.ensureObjectMetaApplyConfigurationExists()
 	for i := range values {
 		if values[i] == nil {
 			panic("nil value passed to WithOwnerReferences")
 		}
-		b.OwnerReferences = append(b.OwnerReferences, *values[i])
+		b.ObjectMetaApplyConfiguration.OwnerReferences = append(b.ObjectMetaApplyConfiguration.OwnerReferences, *values[i])
 	}
 	return b
 }
@@ -213,14 +226,14 @@ func (b *NetNamespaceApplyConfiguration) WithOwnerReferences(values ...*v1.Owner
 func (b *NetNamespaceApplyConfiguration) WithFinalizers(values ...string) *NetNamespaceApplyConfiguration {
 	b.ensureObjectMetaApplyConfigurationExists()
 	for i := range values {
-		b.Finalizers = append(b.Finalizers, values[i])
+		b.ObjectMetaApplyConfiguration.Finalizers = append(b.ObjectMetaApplyConfiguration.Finalizers, values[i])
 	}
 	return b
 }
 
 func (b *NetNamespaceApplyConfiguration) ensureObjectMetaApplyConfigurationExists() {
 	if b.ObjectMetaApplyConfiguration == nil {
-		b.ObjectMetaApplyConfiguration = &v1.ObjectMetaApplyConfiguration{}
+		b.ObjectMetaApplyConfiguration = &metav1.ObjectMetaApplyConfiguration{}
 	}
 }
 
@@ -248,4 +261,26 @@ func (b *NetNamespaceApplyConfiguration) WithEgressIPs(values ...networkv1.NetNa
 		b.EgressIPs = append(b.EgressIPs, values[i])
 	}
 	return b
+}
+
+// GetKind retrieves the value of the Kind field in the declarative configuration.
+func (b *NetNamespaceApplyConfiguration) GetKind() *string {
+	return b.TypeMetaApplyConfiguration.Kind
+}
+
+// GetAPIVersion retrieves the value of the APIVersion field in the declarative configuration.
+func (b *NetNamespaceApplyConfiguration) GetAPIVersion() *string {
+	return b.TypeMetaApplyConfiguration.APIVersion
+}
+
+// GetName retrieves the value of the Name field in the declarative configuration.
+func (b *NetNamespaceApplyConfiguration) GetName() *string {
+	b.ensureObjectMetaApplyConfigurationExists()
+	return b.ObjectMetaApplyConfiguration.Name
+}
+
+// GetNamespace retrieves the value of the Namespace field in the declarative configuration.
+func (b *NetNamespaceApplyConfiguration) GetNamespace() *string {
+	b.ensureObjectMetaApplyConfigurationExists()
+	return b.ObjectMetaApplyConfiguration.Namespace
 }

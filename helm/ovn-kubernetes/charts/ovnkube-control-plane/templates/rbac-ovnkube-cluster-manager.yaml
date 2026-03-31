@@ -73,14 +73,24 @@ rules:
           - adminpolicybasedexternalroutes
           - egressfirewalls
           - egressqoses
+          - networkqoses
           - userdefinednetworks
+          - clusteruserdefinednetworks
+          - vteps
+          - clusternetworkconnects
       verbs: [ "get", "list", "watch" ]
     - apiGroups: ["k8s.ovn.org"]
       resources:
           - egressips
           - egressservices/status
+          - networkqoses/status
           - userdefinednetworks
           - userdefinednetworks/status
+          - clusteruserdefinednetworks
+          - clusteruserdefinednetworks/status
+          - clusteruserdefinednetworks/finalizers
+          - clusternetworkconnects
+          - clusternetworkconnects/status
       verbs: [ "patch", "update" ]
     - apiGroups: [""]
       resources:
@@ -88,7 +98,7 @@ rules:
       verbs: ["create", "patch", "update"]
     - apiGroups: [""]
       resources:
-          - pods/status # used in multi-homing: https://github.com/ovn-org/ovn-kubernetes/blob/a9beb6fd4f8ea32b264999a8ebec25cd6bdc2281/go-controller/pkg/util/pod.go#L49
+          - pods/status # used in multi-homing: https://github.com/ovn-kubernetes/ovn-kubernetes/blob/a9beb6fd4f8ea32b264999a8ebec25cd6bdc2281/go-controller/pkg/util/pod.go#L49
           - nodes/status
           - services/status
       verbs: [ "patch", "update" ]
@@ -120,4 +130,18 @@ rules:
       resources:
           - dnsnameresolvers
       verbs: [ "create", "delete", "list", "patch", "update", "watch" ]
+    {{- end }}
+    {{- if eq (hasKey .Values.global "enableRouteAdvertisements" | ternary .Values.global.enableRouteAdvertisements false) true }}
+    - apiGroups: ["k8s.ovn.org"]
+      resources:
+          - routeadvertisements
+      verbs: [ "get", "list", "watch", "create", "delete", "patch", "update" ]
+    - apiGroups: ["k8s.ovn.org"]
+      resources:
+          - routeadvertisements/status
+      verbs: [ "patch", "update" ]
+    - apiGroups: ["frrk8s.metallb.io"]
+      resources:
+          - frrconfigurations
+      verbs: [ "create", "delete", "get", "list", "patch", "update", "watch" ]
     {{- end }}

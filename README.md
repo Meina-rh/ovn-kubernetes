@@ -13,13 +13,13 @@
 
 [apache2-badge]: https://img.shields.io/badge/License-Apache%202.0-blue.svg
 [apache2-url]: https://opensource.org/licenses/Apache-2.0
-[build-badge]: https://img.shields.io/github/actions/workflow/status/ovn-org/ovn-kubernetes/test.yml?branch=master
+[build-badge]: https://img.shields.io/github/actions/workflow/status/ovn-kubernetes/ovn-kubernetes/test.yml?branch=master
 [book-badge]: https://img.shields.io/badge/read%20the-book-9cf.svg
 [book-url]: https://ovn-kubernetes.io/
-[go-report-card-badge]: https://goreportcard.com/badge/github.com/ovn-org/ovn-kubernetes
-[go-report-url]: https://goreportcard.com/report/github.com/ovn-org/ovn-kubernetes
-[go-doc-badge]: https://pkg.go.dev/badge/github.com/ovn-org/ovn-kubernetes
-[go-doc-url]: https://pkg.go.dev/github.com/ovn-org/ovn-kubernetes
+[go-report-card-badge]: https://goreportcard.com/badge/github.com/ovn-kubernetes/ovn-kubernetes
+[go-report-url]: https://goreportcard.com/report/github.com/ovn-kubernetes/ovn-kubernetes
+[go-doc-badge]: https://pkg.go.dev/badge/github.com/ovn-kubernetes/ovn-kubernetes
+[go-doc-url]: https://pkg.go.dev/github.com/ovn-kubernetes/ovn-kubernetes
 [slack-badge]: https://img.shields.io/badge/slack-ovn_kubernetes-blue
 [slack-url]: https://cloud-native.slack.com/archives/C08452HR8V6
 
@@ -35,9 +35,9 @@ Here are some links to help in your ovn-kubernetes journey:
 
 - [Welcome to ovn-kubernetes](https://ovn-kubernetes.io/) for overview of ovn-kubernetes.
 - [Architecture of ovn-kubernetes](https://ovn-kubernetes.io/design/architecture/)
-- [Deploying OVN Kubernetes cluster using KIND](https://ovn-kubernetes.io/installation/launching-ovn-kubernetes-on-kind/)
-- [Deploying OVN Kubernetes CNI using Helm](https://ovn-kubernetes.io/installation/launching-ovn-kubernetes-with-helm/)
-- [Contributing to OVN Kubernetes](https://ovn-kubernetes.io/governance/CONTRIBUTING/) for how to get involved
+- [Deploying OVN-Kubernetes cluster using KIND](https://ovn-kubernetes.io/installation/launching-ovn-kubernetes-on-kind/)
+- [Deploying OVN-Kubernetes CNI using Helm](https://ovn-kubernetes.io/installation/launching-ovn-kubernetes-with-helm/)
+- [Contributing to OVN-Kubernetes](https://ovn-kubernetes.io/governance/CONTRIBUTING/) for how to get involved
   in our project
 - [Meet the Community](https://ovn-kubernetes.io/governance/MEETINGS/) for details on community
   meeting details.

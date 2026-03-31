@@ -8,15 +8,18 @@ import (
 
 	current "github.com/containernetworking/cni/pkg/types/100"
 	nadapi "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
+	nadv1Listers "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/listers/k8s.cni.cncf.io/v1"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 	corev1listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/klog/v2"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/cni/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/networkmanager"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/libovsdb/client"
+
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/cni/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/networkmanager"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 // ServerRunDir is the default directory for CNIServer runtime files
@@ -56,8 +59,11 @@ type PodInterfaceInfo struct {
 
 	// network name, for default network, it is "default", otherwise it is net-attach-def's netconf spec name
 	NetName string `json:"netName"`
-	// NADName, for default network, it is "default", otherwise, in the form of net-attach-def's <Namespace>/<Name>
-	NADName string `json:"nadName"`
+	// NADKey, for default network, it is "default", otherwise, in the form of net-attach-def's <Namespace>/<Name>{/index}
+	NADKey string `json:"nadKey"`
+	// pod interface names of the same NAD, in plumbing order.
+	// Only set for when there are more than one pod interface with the same UDN
+	PodIfNamesOfSameNAD []string `json:"pod-if-names"`
 }
 
 // Explicit type for CNI commands the server handles
@@ -74,6 +80,12 @@ const CNIDel command = "DEL"
 
 // CNICheck is the command representing check operation on a pod
 const CNICheck command = "CHECK"
+
+// CNIStatus is the command representing a plugin readiness check
+const CNIStatus command = "STATUS"
+
+// CNIGC is the command representing CNI runtime garbage collection
+const CNIGC command = "GC"
 
 // Request sent to the Server by the OVN CNI plugin
 type Request struct {
@@ -94,9 +106,11 @@ type CNIRequestMetrics struct {
 
 // Response sent to the OVN CNI plugin by the Server
 type Response struct {
-	Result    *current.Result
-	PodIFInfo *PodInterfaceInfo
-	KubeAuth  *KubeAPIAuth
+	Result            *current.Result
+	PodIFInfo         *PodInterfaceInfo
+	PrimaryUDNPodInfo *PodInterfaceInfo
+	PrimaryUDNPodReq  *PodRequest
+	KubeAuth          *KubeAPIAuth
 }
 
 func (response *Response) Marshal() ([]byte, error) {
@@ -159,16 +173,20 @@ type PodRequest struct {
 	// network name, for default network, this will be types.DefaultNetworkName
 	netName string
 
-	// for ovs interfaces plumbed for secondary networks, their iface-id's prefix is derived from the specific nadName;
+	// for ovs interfaces plumbed for UDNs, their iface-id's prefix is derived from the specific nadName;
 	// also, need to find the pod annotation, dpu pod connection/status annotations of the given NAD ("default"
 	// for default network).
 	nadName string
+	// for default/primary UDN network, nadKey is the same as nadName, for secondary UDN, if a Pod requests
+	// network attachment of multiple same secondary UDN, nadKey would be nadName for its first interface CNI request,
+	// and <nadName>/<index> (index starting from 1) for the subsequent interface CNI request
+	nadKey string
 
 	// the DeviceInfo struct
 	deviceInfo nadapi.DeviceInfo
 }
 
-type podRequestFunc func(request *PodRequest, clientset *ClientSet, kubeAuth *KubeAPIAuth, networkManager networkmanager.Interface) ([]byte, error)
+type podRequestFunc func(request *PodRequest, clientset *ClientSet, kubeAuth *KubeAPIAuth, networkManager networkmanager.Interface, ovsClient client.Client) ([]byte, error)
 type getCNIResultFunc func(request *PodRequest, getter PodInfoGetter, podInterfaceInfo *PodInterfaceInfo) (*current.Result, error)
 
 type PodInfoGetter interface {
@@ -179,6 +197,7 @@ type ClientSet struct {
 	PodInfoGetter
 	kclient   kubernetes.Interface
 	podLister corev1listers.PodLister
+	nadLister nadv1Listers.NetworkAttachmentDefinitionLister
 }
 
 func NewClientSet(kclient kubernetes.Interface, podLister corev1listers.PodLister) *ClientSet {
@@ -186,6 +205,11 @@ func NewClientSet(kclient kubernetes.Interface, podLister corev1listers.PodListe
 		kclient:   kclient,
 		podLister: podLister,
 	}
+}
+
+// DPUStatusProvider reports whether the DPU is ready to service CNI requests.
+type DPUStatusProvider interface {
+	Ready() (bool, string)
 }
 
 // Server object that listens for JSON-marshaled Request objects
@@ -196,4 +220,6 @@ type Server struct {
 	clientSet            *ClientSet
 	kubeAuth             *KubeAPIAuth
 	networkManager       networkmanager.Interface
+	ovsClient            client.Client
+	dpuHealth            DPUStatusProvider
 }

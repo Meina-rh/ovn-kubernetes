@@ -9,12 +9,12 @@ import (
 	knet "k8s.io/api/networking/v1"
 	"k8s.io/klog/v2"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 const PolicyForAnnotation = "k8s.v1.cni.cncf.io/policy-for"
 
-func (bsnc *BaseSecondaryNetworkController) syncMultiNetworkPolicies(multiPolicies []interface{}) error {
+func (bsnc *BaseUserDefinedNetworkController) syncMultiNetworkPolicies(multiPolicies []interface{}) error {
 	expectedPolicies := make(map[string]map[string]bool)
 	for _, npInterface := range multiPolicies {
 		policy, ok := npInterface.(*mnpapi.MultiNetworkPolicy)
@@ -38,7 +38,7 @@ func (bsnc *BaseSecondaryNetworkController) syncMultiNetworkPolicies(multiPolici
 	return bsnc.syncNetworkPoliciesCommon(expectedPolicies)
 }
 
-func (bsnc *BaseSecondaryNetworkController) shouldApplyMultiPolicy(mpolicy *mnpapi.MultiNetworkPolicy) bool {
+func (bsnc *BaseUserDefinedNetworkController) shouldApplyMultiPolicy(mpolicy *mnpapi.MultiNetworkPolicy) bool {
 	policyForAnnot, ok := mpolicy.Annotations[PolicyForAnnotation]
 	if !ok {
 		klog.V(5).Infof("%s annotation not defined in multi-policy %s/%s", PolicyForAnnotation,
@@ -54,7 +54,8 @@ func (bsnc *BaseSecondaryNetworkController) shouldApplyMultiPolicy(mpolicy *mnpa
 			networkName = substrings[1]
 			networkNamespace = substrings[0]
 		}
-		if bsnc.HasNAD(util.GetNADName(networkNamespace, networkName)) {
+		nadKey := util.GetNADName(networkNamespace, networkName)
+		if bsnc.networkManager.GetNetworkNameForNADKey(nadKey) == bsnc.GetNetworkName() {
 			return true
 		}
 	}
@@ -77,6 +78,7 @@ func convertMultiNetPolicyToNetPolicy(mpolicy *mnpapi.MultiNetworkPolicy, allowP
 			ingress.Ports[j] = knet.NetworkPolicyPort{
 				Protocol: mport.Protocol,
 				Port:     mport.Port,
+				EndPort:  mport.EndPort,
 			}
 		}
 		ingress.From = make([]knet.NetworkPolicyPeer, len(mingress.From))
@@ -104,6 +106,7 @@ func convertMultiNetPolicyToNetPolicy(mpolicy *mnpapi.MultiNetworkPolicy, allowP
 			egress.Ports[j] = knet.NetworkPolicyPort{
 				Protocol: mport.Protocol,
 				Port:     mport.Port,
+				EndPort:  mport.EndPort,
 			}
 		}
 		egress.To = make([]knet.NetworkPolicyPeer, len(megress.To))

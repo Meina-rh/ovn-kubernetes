@@ -59,6 +59,7 @@ rules:
       resources:
           - namespaces
           - nodes
+          - nodes/status
           - pods
           - services
           - endpoints
@@ -83,6 +84,10 @@ rules:
           - egressqoses
           - egressservices
           - adminpolicybasedexternalroutes
+          - userdefinednetworks
+          - clusteruserdefinednetworks
+          - networkqoses
+          - vteps
       verbs: [ "get", "list", "watch" ]
     - apiGroups: ["k8s.cni.cncf.io"]
       resources:
@@ -92,7 +97,11 @@ rules:
     - apiGroups: ["k8s.cni.cncf.io"]
       resources:
           - network-attachment-definitions
-      verbs: ["patch"]
+      verbs: [ "patch", "update" ]
+    - apiGroups: [ "k8s.cni.cncf.io" ]
+      resources:
+      - network-attachment-definitions
+      verbs: [ "create", "delete" ]
     - apiGroups: ["policy.networking.k8s.io"]
       resources:
           - adminnetworkpolicies/status
@@ -103,9 +112,16 @@ rules:
           - egressfirewalls/status
           - egressips
           - egressqoses
+          - networkqoses
           - egressservices/status
           - adminpolicybasedexternalroutes/status
           - egressqoses/status
+          - userdefinednetworks
+          - userdefinednetworks/status
+          - clusteruserdefinednetworks
+          - clusteruserdefinednetworks/status
+          - clusteruserdefinednetworks/finalizers
+          - networkqoses/status
       verbs: [ "patch", "update" ]
     - apiGroups: [""]
       resources:
@@ -125,7 +141,7 @@ rules:
     {{- end }}
 
 
-# https://github.com/ovn-org/ovn-kubernetes/blob/e1e7d40f9a6c6038b52696c1b8f8915a4d73160e/go-controller/pkg/ovn/topology_version.go#L28
+# https://github.com/ovn-kubernetes/ovn-kubernetes/blob/e1e7d40f9a6c6038b52696c1b8f8915a4d73160e/go-controller/pkg/ovn/topology_version.go#L28
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role

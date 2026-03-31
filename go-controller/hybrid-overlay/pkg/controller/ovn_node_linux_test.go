@@ -18,14 +18,14 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
 
-	hotypes "github.com/ovn-org/ovn-kubernetes/go-controller/hybrid-overlay/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/informer"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
-	ovntest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util/mocks"
+	hotypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/hybrid-overlay/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/informer"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/kube"
+	ovntest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util/mocks"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -155,7 +155,7 @@ func createPod(namespace, name, node, podIP, podMAC string) *corev1.Pod {
 	if podIP != "" || podMAC != "" {
 		ipn := ovntest.MustParseIPNet(podIP)
 		gatewayIP := iputils.NextIP(ipn.IP)
-		annotations[util.OvnPodAnnotationName] = fmt.Sprintf(`{"default": {"ip_address":"` + podIP + `", "mac_address":"` + podMAC + `", "gateway_ip": "` + gatewayIP.String() + `"}}`)
+		annotations[util.OvnPodAnnotationName] = `{"default": {"ip_address":"` + podIP + `", "mac_address":"` + podMAC + `", "gateway_ip": "` + gatewayIP.String() + `"}}`
 	}
 
 	return &corev1.Pod{
@@ -395,7 +395,7 @@ var _ = Describe("Hybrid Overlay Node Linux Operations", func() {
 		app.Action = func(ctx *cli.Context) error {
 			annotations := createNodeAnnotationsForSubnet(thisNodeSubnet)
 			annotations[hotypes.HybridOverlayDRMAC] = thisNodeDRMAC
-			annotations[util.OVNNodeGRLRPAddrs] = "{\"default\":{\"ipv4\":\"100.64.0.3/16\"}}"
+			annotations[util.OvnNodeID] = "3"
 			annotations[hotypes.HybridOverlayDRIP] = thisNodeDRIP
 			node := createNode(thisNode, "linux", thisNodeIP, annotations)
 			fakeClient := fake.NewSimpleClientset(&corev1.NodeList{
@@ -461,13 +461,13 @@ var _ = Describe("Hybrid Overlay Node Linux Operations", func() {
 
 			annotations := createNodeAnnotationsForSubnet(thisNodeSubnet)
 			annotations[hotypes.HybridOverlayDRMAC] = thisNodeDRMAC
-			annotations[util.OVNNodeGRLRPAddrs] = "{\"default\":{\"ipv4\":\"100.64.0.3/16\"}}"
+			annotations[util.OvnNodeID] = "3"
 			annotations[hotypes.HybridOverlayDRIP] = thisNodeDRIP
 			node := createNode(thisNode, "linux", thisNodeIP, annotations)
 
 			remoteNodeAnnotations := createNodeAnnotationsForSubnet(remoteNodeSubnet)
 			remoteNodeAnnotations[hotypes.HybridOverlayDRMAC] = remoteNodeDRMAC
-			remoteNodeAnnotations[util.OVNNodeGRLRPAddrs] = "{\"default\":{\"ipv4\":\"100.65.0.3/16\"}}"
+			remoteNodeAnnotations[util.OvnNodeID] = "3"
 			remoteNodeAnnotations[hotypes.HybridOverlayDRIP] = "1.2.4.3"
 			remoteNode := createNode(remoteNodeName, "linux", "10.20.20.1", remoteNodeAnnotations)
 
@@ -564,7 +564,7 @@ var _ = Describe("Hybrid Overlay Node Linux Operations", func() {
 
 			annotations := createNodeAnnotationsForSubnet(thisNodeSubnet)
 			annotations[hotypes.HybridOverlayDRMAC] = thisNodeDRMAC
-			annotations[util.OVNNodeGRLRPAddrs] = "{\"default\":{\"ipv4\":\"100.64.0.3/16\"}}"
+			annotations[util.OvnNodeID] = "3"
 			annotations[hotypes.HybridOverlayDRIP] = thisNodeDRIP
 			node := createNode(thisNode, "linux", thisNodeIP, annotations)
 			testPod := createPod("test", "pod1", thisNode, pod1CIDR, pod1MAC)
@@ -648,7 +648,7 @@ var _ = Describe("Hybrid Overlay Node Linux Operations", func() {
 
 			annotations := createNodeAnnotationsForSubnet(thisNodeSubnet)
 			annotations[hotypes.HybridOverlayDRMAC] = thisNodeDRMAC
-			annotations[util.OVNNodeGRLRPAddrs] = "{\"default\":{\"ipv4\":\"100.64.0.3/16\"}}"
+			annotations[util.OvnNodeID] = "3"
 			annotations[hotypes.HybridOverlayDRIP] = thisNodeDRIP
 			node := createNode(thisNode, "linux", thisNodeIP, annotations)
 			fakeClient := fake.NewSimpleClientset(&corev1.NodeList{
@@ -748,7 +748,7 @@ var _ = Describe("Hybrid Overlay Node Linux Operations", func() {
 
 			annotations := createNodeAnnotationsForSubnet(thisNodeSubnet)
 			annotations[hotypes.HybridOverlayDRMAC] = thisNodeDRMAC
-			annotations[util.OVNNodeGRLRPAddrs] = "{\"default\":{\"ipv4\":\"100.64.0.3/16\"}}"
+			annotations[util.OvnNodeID] = "3"
 			annotations[hotypes.HybridOverlayDRIP] = thisNodeDRIP
 			node := createNode(thisNode, "linux", thisNodeIP, annotations)
 			fakeClient := fake.NewSimpleClientset(&corev1.NodeList{
@@ -888,7 +888,7 @@ var _ = Describe("Hybrid Overlay Node Linux Operations", func() {
 
 			annotations := createNodeAnnotationsForSubnet(thisNodeSubnet)
 			annotations[hotypes.HybridOverlayDRMAC] = thisNodeDRMAC
-			annotations[util.OVNNodeGRLRPAddrs] = "{\"default\":{\"ipv4\":\"100.64.0.3/16\"}}"
+			annotations[util.OvnNodeID] = "3"
 			annotations[hotypes.HybridOverlayDRIP] = thisNodeDRIP
 			node := createNode(thisNode, "linux", thisNodeIP, annotations)
 			fakeClient := fake.NewSimpleClientset(&corev1.NodeList{
@@ -1017,7 +1017,7 @@ var _ = Describe("Hybrid Overlay Node Linux Operations", func() {
 
 			annotations := createNodeAnnotationsForSubnet(thisNodeSubnet)
 			annotations[hotypes.HybridOverlayDRMAC] = thisNodeDRMAC
-			annotations[util.OVNNodeGRLRPAddrs] = "{\"default\":{\"ipv4\":\"100.64.0.3/16\"}}"
+			annotations[util.OvnNodeID] = "3"
 			annotations[hotypes.HybridOverlayDRIP] = thisNodeDRIP
 			node := createNode(thisNode, "linux", thisNodeIP, annotations)
 			fakeClient := fake.NewSimpleClientset(&corev1.NodeList{

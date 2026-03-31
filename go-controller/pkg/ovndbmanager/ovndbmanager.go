@@ -22,9 +22,9 @@ import (
 	"k8s.io/klog/v2"
 	utilnet "k8s.io/utils/net"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/kube"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 var errDB = errors.New("error interacting with OVN database")
@@ -47,7 +47,7 @@ func RunDBChecker(kclient kube.Interface, stopCh <-chan struct{}) {
 		if err := convertNBDBSchema(); err != nil {
 			klog.Fatalf("NBDB conversion failed: %v", err)
 		}
-		ensureOvnDBState(util.OvnNbdbLocation, kclient, stopCh)
+		ensureOvnDBState(config.OvnNorth.DbLocation, kclient, stopCh)
 	}()
 
 	wg.Add(1)
@@ -56,7 +56,7 @@ func RunDBChecker(kclient kube.Interface, stopCh <-chan struct{}) {
 		if err := convertSBDBSchema(); err != nil {
 			klog.Fatalf("SBDB conversion failed: %v", err)
 		}
-		ensureOvnDBState(util.OvnSbdbLocation, kclient, stopCh)
+		ensureOvnDBState(config.OvnSouth.DbLocation, kclient, stopCh)
 	}()
 	<-stopCh
 	klog.Info("Shutting down db checker")
@@ -132,7 +132,7 @@ func updateDBRetryCounter(retryCounter *int32, db *util.OvsDbProperties) {
 		//delete the db file and start master
 		err := resetRaftDB(db)
 		if err != nil {
-			klog.Warningf(err.Error())
+			klog.Warningf("Could not reset raft DB: %v", err)
 		}
 		*retryCounter = 0
 	} else {
@@ -226,7 +226,7 @@ func ensureClusterRaftMembership(db *util.OvsDbProperties, kclient kube.Interfac
 	r = regexp.MustCompile(`([a-z0-9]{4}) at ` + dbServerRegexp)
 	members := r.FindAllStringSubmatch(out, -1)
 	kickedMembersCount := 0
-	dbPods, err := kclient.GetPods(config.Kubernetes.OVNConfigNamespace, metav1.ListOptions{
+	dbPods, err := kclient.GetPodsForDBChecker(config.Kubernetes.OVNConfigNamespace, metav1.ListOptions{
 		LabelSelector: labels.Set(map[string]string{"ovn-db-pod": "true"}).String(),
 	})
 	if err != nil {

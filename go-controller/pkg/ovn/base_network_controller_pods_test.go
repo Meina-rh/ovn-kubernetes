@@ -11,8 +11,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	ovntest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	ovntest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 func TestBaseNetworkController_trackPodsReleasedBeforeStartup(t *testing.T) {
@@ -231,6 +231,44 @@ func TestBaseNetworkController_trackPodsReleasedBeforeStartup(t *testing.T) {
 			bnc.trackPodsReleasedBeforeStartup(tt.podAnnotations)
 
 			g.Expect(bnc.releasedPodsBeforeStartup).To(gomega.Equal(tt.expected))
+		})
+	}
+}
+
+func TestBaseNetworkController_shouldReleaseDeletedPod(t *testing.T) {
+	tests := []struct {
+		name string // description of this test case
+		// Named input parameters for target function.
+		pod        *corev1.Pod
+		switchName string
+		nad        string
+		podIfAddrs []*net.IPNet
+		want       bool
+		wantErr    bool
+	}{
+		{
+			name: "should release a running pod",
+			pod:  &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodRunning}},
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var bnc BaseNetworkController
+			bnc.ReconcilableNetInfo = &util.DefaultNetInfo{}
+			got, gotErr := bnc.shouldReleaseDeletedPod(tt.pod, tt.switchName, tt.nad, tt.podIfAddrs)
+			if gotErr != nil {
+				if !tt.wantErr {
+					t.Errorf("shouldReleaseDeletedPod() failed: %v", gotErr)
+				}
+				return
+			}
+			if tt.wantErr {
+				t.Fatal("shouldReleaseDeletedPod() succeeded unexpectedly")
+			}
+			if got != tt.want {
+				t.Errorf("shouldReleaseDeletedPod() = %v, want %v", got, tt.want)
+			}
 		})
 	}
 }

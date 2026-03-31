@@ -6,8 +6,8 @@ package nbdb
 import (
 	"encoding/json"
 
-	"github.com/ovn-org/libovsdb/model"
-	"github.com/ovn-org/libovsdb/ovsdb"
+	"github.com/ovn-kubernetes/libovsdb/model"
+	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 )
 
 // FullDatabaseModel returns the DatabaseModel object to be used in libovsdb
@@ -38,6 +38,7 @@ func FullDatabaseModel() (model.ClientDBModel, error) {
 		"Meter":                       &Meter{},
 		"Meter_Band":                  &MeterBand{},
 		"Mirror":                      &Mirror{},
+		"Mirror_Rule":                 &MirrorRule{},
 		"NAT":                         &NAT{},
 		"NB_Global":                   &NBGlobal{},
 		"Port_Group":                  &PortGroup{},
@@ -52,7 +53,7 @@ func FullDatabaseModel() (model.ClientDBModel, error) {
 
 var schema = `{
   "name": "OVN_Northbound",
-  "version": "7.6.0",
+  "version": "7.12.0",
   "tables": {
     "ACL": {
       "columns": {
@@ -819,6 +820,8 @@ var schema = `{
                   "eth_dst",
                   "ip_src",
                   "ip_dst",
+                  "ipv6_src",
+                  "ipv6_dst",
                   "tp_src",
                   "tp_dst"
                 ]
@@ -1026,7 +1029,8 @@ var schema = `{
                 [
                   "allow",
                   "drop",
-                  "reroute"
+                  "reroute",
+                  "jump"
                 ]
               ]
             }
@@ -1043,6 +1047,15 @@ var schema = `{
             "max": "unlimited"
           }
         },
+        "chain": {
+          "type": {
+            "key": {
+              "type": "string"
+            },
+            "min": 0,
+            "max": 1
+          }
+        },
         "external_ids": {
           "type": {
             "key": {
@@ -1053,6 +1066,15 @@ var schema = `{
             },
             "min": 0,
             "max": "unlimited"
+          }
+        },
+        "jump_chain": {
+          "type": {
+            "key": {
+              "type": "string"
+            },
+            "min": 0,
+            "max": 1
           }
         },
         "match": {
@@ -1187,7 +1209,7 @@ var schema = `{
             "key": {
               "type": "string"
             },
-            "min": 1,
+            "min": 0,
             "max": "unlimited"
           }
         },
@@ -1301,6 +1323,29 @@ var schema = `{
         },
         "route_table": {
           "type": "string"
+        },
+        "selection_fields": {
+          "type": {
+            "key": {
+              "type": "string",
+              "enum": [
+                "set",
+                [
+                  "eth_src",
+                  "eth_dst",
+                  "ip_proto",
+                  "ip_src",
+                  "ip_dst",
+                  "ipv6_src",
+                  "ipv6_dst",
+                  "tp_src",
+                  "tp_dst"
+                ]
+              ]
+            },
+            "min": 0,
+            "max": "unlimited"
+          }
         }
       }
     },
@@ -1532,6 +1577,15 @@ var schema = `{
             "max": 1
           }
         },
+        "peer": {
+          "type": {
+            "key": {
+              "type": "string"
+            },
+            "min": 0,
+            "max": 1
+          }
+        },
         "port_security": {
           "type": {
             "key": {
@@ -1715,6 +1769,17 @@ var schema = `{
         "index": {
           "type": "integer"
         },
+        "mirror_rules": {
+          "type": {
+            "key": {
+              "type": "uuid",
+              "refTable": "Mirror_Rule",
+              "refType": "strong"
+            },
+            "min": 0,
+            "max": "unlimited"
+          }
+        },
         "name": {
           "type": "string"
         },
@@ -1730,7 +1795,8 @@ var schema = `{
                 [
                   "gre",
                   "erspan",
-                  "local"
+                  "local",
+                  "lport"
                 ]
               ]
             }
@@ -1743,6 +1809,36 @@ var schema = `{
         ]
       ],
       "isRoot": true
+    },
+    "Mirror_Rule": {
+      "columns": {
+        "action": {
+          "type": {
+            "key": {
+              "type": "string",
+              "enum": [
+                "set",
+                [
+                  "mirror",
+                  "skip"
+                ]
+              ]
+            }
+          }
+        },
+        "match": {
+          "type": "string"
+        },
+        "priority": {
+          "type": {
+            "key": {
+              "type": "integer",
+              "minInteger": 0,
+              "maxInteger": 32767
+            }
+          }
+        }
+      }
     },
     "NAT": {
       "columns": {
@@ -2090,6 +2186,9 @@ var schema = `{
           "type": "string"
         },
         "ssl_ciphers": {
+          "type": "string"
+        },
+        "ssl_ciphersuites": {
           "type": "string"
         },
         "ssl_protocols": {

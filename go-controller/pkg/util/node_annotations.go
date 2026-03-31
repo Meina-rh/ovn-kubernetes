@@ -12,11 +12,11 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
-	utilnet "k8s.io/utils/net"
+	"k8s.io/client-go/util/retry"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/kube"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
 )
 
 // This handles the annotations used by the node to pass information about its local
@@ -56,7 +56,7 @@ const (
 	// OvnDefaultNetworkGateway captures L3 gateway config for default OVN network interface
 	ovnDefaultNetworkGateway = "default"
 
-	// OvnNodeManagementPort is the constant string representing the annotation key
+	// Deprecated OvnNodeManagementPort is the constant string representing the annotation key
 	OvnNodeManagementPort = "k8s.ovn.org/node-mgmt-port"
 
 	// OvnNodeManagementPortMacAddresses contains all mac addresses of the management ports
@@ -86,6 +86,7 @@ const (
 	//		\"l2-network\":{\"ipv4\":\"100.65.0.4/16\",\"ipv6\":\"fd99::4/64\"},
 	//		\"l3-network\":{\"ipv4\":\"100.65.0.4/16\",\"ipv6\":\"fd99::4/64\"}
 	// }",
+	// deprecated, only used for cleanup
 	OVNNodeGRLRPAddrs = "k8s.ovn.org/node-gateway-router-lrp-ifaddrs"
 
 	// OvnNodeMasqCIDR is the CIDR form representation of the masquerade subnet that is currently configured on this node (i.e. 169.254.169.0/29)
@@ -96,6 +97,9 @@ const (
 
 	// OVNNodeHostCIDRs is used to track the different host IP addresses and subnet masks on the node
 	OVNNodeHostCIDRs = "k8s.ovn.org/host-cidrs"
+
+	// OVNNodePrimaryDPUHostAddr is used to track the primary DPU host address on the node
+	OVNNodePrimaryDPUHostAddr = "k8s.ovn.org/primary-dpu-host-addr"
 
 	// OVNNodeSecondaryHostEgressIPs contains EgressIP addresses that aren't managed by OVN. The EIP addresses are assigned to
 	// standard linux interfaces and not interfaces of type OVS.
@@ -113,50 +117,35 @@ const (
 	// ovnkube-node gets the node's zone from the OVN Southbound database.
 	OvnNodeZoneName = "k8s.ovn.org/zone-name"
 
-	/** HACK BEGIN **/
-	// TODO(tssurya): Remove this annotation a few months from now (when one or two release jump
-	// upgrades are done). This has been added only to minimize disruption for upgrades when
-	// moving to interconnect=true.
-	// We want the legacy ovnkube-master to wait for remote ovnkube-node to
-	// signal it using "k8s.ovn.org/remote-zone-migrated" annotation before
-	// considering a node as remote when we upgrade from "global" (1 zone IC)
-	// zone to multi-zone. This is so that network disruption for the existing workloads
-	// is negligible and until the point where ovnkube-node flips the switch to connect
-	// to the new SBDB, it would continue talking to the legacy RAFT ovnkube-sbdb to ensure
-	// OVN/OVS flows are intact.
-	// OvnNodeMigratedZoneName is the zone to which the node belongs to. It is set by ovnkube-node.
-	// ovnkube-node gets the node's zone from the OVN Southbound database.
-	OvnNodeMigratedZoneName = "k8s.ovn.org/remote-zone-migrated"
-	/** HACK END **/
-
-	// ovnTransitSwitchPortAddr is the annotation to store the node Transit switch port ips.
+	// OvnTransitSwitchPortAddr is the annotation to store the node Transit switch port ips.
 	// It is set by cluster manager.
-	ovnTransitSwitchPortAddr = "k8s.ovn.org/node-transit-switch-port-ifaddr"
+	OvnTransitSwitchPortAddr = "k8s.ovn.org/node-transit-switch-port-ifaddr"
 
-	// ovnNodeID is the id (of type integer) of a node. It is set by cluster-manager.
-	ovnNodeID = "k8s.ovn.org/node-id"
+	// OvnNodeID is the id (of type integer) of a node. It is set by cluster-manager.
+	OvnNodeID = "k8s.ovn.org/node-id"
 
 	// InvalidNodeID indicates an invalid node id
 	InvalidNodeID = -1
 
-	// ovnNetworkIDs is the constant string representing the ids allocated for the
+	// OvnNetworkIDs is the constant string representing the ids allocated for the
 	// default network and other layer3 secondary networks by cluster manager.
-	ovnNetworkIDs = "k8s.ovn.org/network-ids"
+	OvnNetworkIDs = "k8s.ovn.org/network-ids"
 
-	// ovnUDNLayer2NodeGRLRPTunnelIDs is the constant string representing the tunnel id allocated for the
+	// types.UDNLayer2NodeGRLRPTunnelIDAnnotation is the constant string representing the tunnel id allocated for the
 	// UDN L2 network for this node's GR LRP by cluster manager. This is used to create the remote tunnel
 	// ports for each node.
 	// "k8s.ovn.org/udn-layer2-node-gateway-router-lrp-tunnel-ids": "{
 	//		"l2-network-a":"5",
 	//		"l2-network-b":"10"}
 	// }",
-	ovnUDNLayer2NodeGRLRPTunnelIDs = "k8s.ovn.org/udn-layer2-node-gateway-router-lrp-tunnel-ids"
+	Layer2TopologyVersion    = "k8s.ovn.org/layer2-topology-version"
+	TransitRouterTopoVersion = "2.0"
 
-	// InvalidID signifies its an invalid network id or invalid tunnel id
-	InvalidID = -1
+	// ovnNodeEncapIPs is used to indicate encap IPs set on the node
+	OVNNodeEncapIPs = "k8s.ovn.org/node-encap-ips"
 
-	// NoID signifies its an empty tunnel id (its reserved as un-usable when the allocator is created)
-	NoID = 0
+	// OvnNodeDontSNATSubnets is a user assigned source subnets that should avoid SNAT at ovn-k8s-mp0 interface
+	OvnNodeDontSNATSubnets = "k8s.ovn.org/node-ingress-snat-exclude-subnets"
 )
 
 type L3GatewayConfig struct {
@@ -400,37 +389,86 @@ func NodeChassisIDAnnotationChanged(oldNode, newNode *corev1.Node) bool {
 	return oldNode.Annotations[OvnNodeChassisID] != newNode.Annotations[OvnNodeChassisID]
 }
 
-type ManagementPortDetails struct {
+// Deprecated
+type legacyManagementPortDetails struct {
 	PfId   int `json:"PfId"`
 	FuncId int `json:"FuncId"`
 }
 
-func SetNodeManagementPortAnnotation(nodeAnnotator kube.Annotator, PfId int, FuncId int) error {
-	mgmtPortDetails := ManagementPortDetails{
-		PfId:   PfId,
-		FuncId: FuncId,
+type NetworkDeviceDetails struct {
+	DeviceId string `json:"DeviceId"`
+	PfId     int    `json:"PfId"`
+	FuncId   int    `json:"FuncId"`
+}
+
+type NetworkDeviceDetailsMap map[string]*NetworkDeviceDetails
+
+func (ndm *NetworkDeviceDetailsMap) String() string {
+	if ndm == nil || *ndm == nil {
+		return "nil"
 	}
-	bytes, err := json.Marshal(mgmtPortDetails)
+
+	ndmString := ""
+	for k, v := range *ndm {
+		ndmString += fmt.Sprintf("%v: %+v,", k, v)
+	}
+	return ndmString
+}
+
+func (cfg *NetworkDeviceDetails) String() string {
+	if cfg == nil {
+		return "none"
+	}
+	return fmt.Sprintf("DeviceId %s PfId: %d, FuncId: %d", cfg.DeviceId, cfg.PfId, cfg.FuncId)
+}
+
+func UpdateNodeManagementPortAnnotation(kube kube.Interface, nodeName string, cfgs NetworkDeviceDetailsMap) error {
+	bytes, err := json.Marshal(cfgs)
 	if err != nil {
-		return fmt.Errorf("failed to marshal mgmtPortDetails with PfId '%v', FuncId '%v'", PfId, FuncId)
+		return fmt.Errorf("failed to marshal node management port details %v: %w", cfgs, err)
+	}
+	return retry.RetryOnConflict(OvnConflictBackoff, func() error {
+		return kube.SetAnnotationsOnNode(nodeName, map[string]interface{}{OvnNodeManagementPort: string(bytes)})
+	})
+}
+
+// SetNodeManagementPortAnnotation is used only when resource name is not specified,
+// only default network management port information needs to be updated
+func SetNodeManagementPortAnnotation(nodeAnnotator kube.Annotator, cfg *NetworkDeviceDetails) error {
+	cfgs := NetworkDeviceDetailsMap{types.DefaultNetworkName: cfg}
+	bytes, err := json.Marshal(cfgs)
+	if err != nil {
+		return fmt.Errorf("failed to marshal mgmtPortDetails %+v: %w", cfg, err)
 	}
 	return nodeAnnotator.Set(OvnNodeManagementPort, string(bytes))
 }
 
-// ParseNodeManagementPortAnnotation returns the parsed host addresses living on a node
-func ParseNodeManagementPortAnnotation(node *corev1.Node) (int, int, error) {
+// ParseNodeManagementPortAnnotation returns the parsed node management port information
+func ParseNodeManagementPortAnnotation(node *corev1.Node) (NetworkDeviceDetailsMap, error) {
 	mgmtPortAnnotation, ok := node.Annotations[OvnNodeManagementPort]
 	if !ok {
-		return -1, -1, newAnnotationNotSetError("%s annotation not found for node %q", OvnNodeManagementPort, node.Name)
+		return nil, newAnnotationNotSetError("%s annotation not found for node %q", OvnNodeManagementPort, node.Name)
 	}
 
-	cfg := ManagementPortDetails{}
-	if err := json.Unmarshal([]byte(mgmtPortAnnotation), &cfg); err != nil {
-		return -1, -1, fmt.Errorf("failed to unmarshal management port annotation %s for node %q: %v",
-			mgmtPortAnnotation, node.Name, err)
+	cfgs := NetworkDeviceDetailsMap{}
+	err := json.Unmarshal([]byte(mgmtPortAnnotation), &cfgs)
+	if err != nil {
+		// possibly it is still in the legacy format
+		legacyCfg := legacyManagementPortDetails{}
+		err = json.Unmarshal([]byte(mgmtPortAnnotation), &legacyCfg)
+		if err != nil {
+			return nil, fmt.Errorf("failed to unmarshal management port annotation %s for node %q: %v",
+				mgmtPortAnnotation, node.Name, err)
+		}
+		cfgs = NetworkDeviceDetailsMap{
+			types.DefaultNetworkName: {
+				PfId:   legacyCfg.PfId,
+				FuncId: legacyCfg.FuncId,
+			},
+		}
 	}
 
-	return cfg.PfId, cfg.FuncId, nil
+	return cfgs, nil
 }
 
 // UpdateNodeManagementPortMACAddresses used only from unit tests
@@ -463,35 +501,58 @@ func ParseNodeManagementPortMACAddresses(node *corev1.Node, netName string) (net
 	return net.ParseMAC(macAddress)
 }
 
-// ParseUDNLayer2NodeGRLRPTunnelIDs parses the 'ovnUDNLayer2NodeGRLRPTunnelIDs' annotation
+func HasUDNLayer2NodeGRLRPTunnelID(node *corev1.Node, netName string) bool {
+	var nodeTunMap map[string]json.RawMessage
+	annotation, ok := node.Annotations[types.UDNLayer2NodeGRLRPTunnelIDAnnotation]
+	if !ok {
+		return false
+	}
+	if err := json.Unmarshal([]byte(annotation), &nodeTunMap); err != nil {
+		return false
+	}
+	if _, ok := nodeTunMap[netName]; ok {
+		return true
+	}
+
+	return false
+}
+
+// ParseUDNLayer2NodeGRLRPTunnelIDs parses the UDN L2 node GR LRP tunnel ID annotation
 // for the specified network in 'netName' and returns the tunnelID.
 func ParseUDNLayer2NodeGRLRPTunnelIDs(node *corev1.Node, netName string) (int, error) {
-	tunnelIDsMap, err := parseNetworkMapAnnotation(node.Annotations, ovnUDNLayer2NodeGRLRPTunnelIDs)
+	tunnelIDsMap, err := parseNetworkMapAnnotation(node.Annotations, types.UDNLayer2NodeGRLRPTunnelIDAnnotation)
 	if err != nil {
-		return InvalidID, err
+		return types.InvalidID, err
 	}
 
 	tunnelID, ok := tunnelIDsMap[netName]
 	if !ok {
-		return InvalidID, newAnnotationNotSetError("node %q has no %q annotation for network %s", node.Name, ovnUDNLayer2NodeGRLRPTunnelIDs, netName)
+		return types.InvalidID, newAnnotationNotSetError("node %q has no %q annotation for network %s", node.Name, types.UDNLayer2NodeGRLRPTunnelIDAnnotation, netName)
 	}
 
 	return strconv.Atoi(tunnelID)
 }
 
-// UpdateUDNLayer2NodeGRLRPTunnelIDs updates the ovnUDNLayer2NodeGRLRPTunnelIDs annotation for the network name 'netName' with the tunnel id 'tunnelID'.
+// UpdateUDNLayer2NodeGRLRPTunnelIDs updates the UDN L2 node GR LRP tunnel ID annotation for the network name 'netName' with the tunnel id 'tunnelID'.
 // If 'tunnelID' is invalid tunnel ID (-1), then it deletes that network from the tunnel ids annotation.
 func UpdateUDNLayer2NodeGRLRPTunnelIDs(annotations map[string]string, netName string, tunnelID int) (map[string]string, error) {
 	if annotations == nil {
 		annotations = map[string]string{}
 	}
-	if err := updateNetworkAnnotation(annotations, netName, tunnelID, ovnUDNLayer2NodeGRLRPTunnelIDs); err != nil {
+	if err := updateNetworkAnnotation(annotations, netName, tunnelID, types.UDNLayer2NodeGRLRPTunnelIDAnnotation); err != nil {
 		return nil, err
 	}
 	return annotations, nil
 }
 
-type primaryIfAddrAnnotation struct {
+func UDNLayer2NodeUsesTransitRouter(node *corev1.Node) bool {
+	return node.Annotations[Layer2TopologyVersion] == TransitRouterTopoVersion
+}
+
+// PrimaryIfAddrAnnotation represents IPv4 and/or IPv6 addresses stored in node annotations.
+// It is used for JSON marshalling/unmarshalling of node interface address information,
+// including primary interface addresses and other node IP configurations.
+type PrimaryIfAddrAnnotation struct {
 	IPv4 string `json:"ipv4,omitempty"`
 	IPv6 string `json:"ipv6,omitempty"`
 }
@@ -501,7 +562,7 @@ func SetNodePrimaryIfAddrs(nodeAnnotator kube.Annotator, ifAddrs []*net.IPNet) (
 	nodeIPNetv4, _ := MatchFirstIPNetFamily(false, ifAddrs)
 	nodeIPNetv6, _ := MatchFirstIPNetFamily(true, ifAddrs)
 
-	primaryIfAddrAnnotation := primaryIfAddrAnnotation{}
+	primaryIfAddrAnnotation := PrimaryIfAddrAnnotation{}
 	if nodeIPNetv4 != nil {
 		primaryIfAddrAnnotation.IPv4 = nodeIPNetv4.String()
 	}
@@ -519,7 +580,7 @@ func createPrimaryIfAddrAnnotation(annotationName string, nodeAnnotation map[str
 	if nodeAnnotation == nil {
 		nodeAnnotation = make(map[string]interface{})
 	}
-	primaryIfAddrAnnotation := primaryIfAddrAnnotation{}
+	primaryIfAddrAnnotation := PrimaryIfAddrAnnotation{}
 	if nodeIPNetv4 != nil {
 		primaryIfAddrAnnotation.IPv4 = nodeIPNetv4.String()
 	}
@@ -534,122 +595,14 @@ func createPrimaryIfAddrAnnotation(annotationName string, nodeAnnotation map[str
 	return nodeAnnotation, nil
 }
 
-func NodeGatewayRouterLRPAddrsAnnotationChanged(oldNode, newNode *corev1.Node) bool {
-	return oldNode.Annotations[OVNNodeGRLRPAddrs] != newNode.Annotations[OVNNodeGRLRPAddrs]
-}
-
-// UpdateNodeGatewayRouterLRPAddrsAnnotation updates a "k8s.ovn.org/node-gateway-router-lrp-ifaddrs" annotation for network "netName",
-// with the specified network, suitable for passing to kube.SetAnnotationsOnNode. If joinSubnets is empty,
-// it deletes the "k8s.ovn.org/node-gateway-router-lrp-ifaddrs" annotation for network "netName"
-func UpdateNodeGatewayRouterLRPAddrsAnnotation(annotations map[string]string, joinSubnets []*net.IPNet, netName string) (map[string]string, error) {
-	if annotations == nil {
-		annotations = map[string]string{}
-	}
-	err := updateJoinSubnetAnnotation(annotations, OVNNodeGRLRPAddrs, netName, joinSubnets)
-	if err != nil {
-		return nil, err
-	}
-	return annotations, nil
-}
-
-// updateJoinSubnetAnnotation add the joinSubnets of the given network to the input node annotations;
-// input annotations is not nil
-// if joinSubnets is empty, deletes the existing subnet annotation for given network from the input node annotations.
-func updateJoinSubnetAnnotation(annotations map[string]string, annotationName, netName string, joinSubnets []*net.IPNet) error {
-	var bytes []byte
-
-	// First get the all host subnets for all existing networks
-	subnetsMap, err := parseJoinSubnetAnnotation(annotations, annotationName)
-	if err != nil {
-		if !IsAnnotationNotSetError(err) {
-			return fmt.Errorf("failed to parse join subnet annotation %q: %w",
-				annotations, err)
-		}
-		// in the case that the annotation does not exist
-		subnetsMap = map[string]primaryIfAddrAnnotation{}
-	}
-
-	// add or delete host subnet of the specified network
-	if len(joinSubnets) != 0 {
-		subnetVal := primaryIfAddrAnnotation{}
-		for _, net := range joinSubnets {
-			if utilnet.IsIPv4CIDR(net) {
-				subnetVal.IPv4 = net.String()
-			} else {
-				subnetVal.IPv6 = net.String()
-			}
-		}
-		subnetsMap[netName] = subnetVal
-	} else {
-		delete(subnetsMap, netName)
-	}
-
-	// if no host subnet left, just delete the host subnet annotation from node annotations.
-	if len(subnetsMap) == 0 {
-		delete(annotations, annotationName)
-		return nil
-	}
-
-	// Marshal all host subnets of all networks back to annotations.
-	bytes, err = json.Marshal(subnetsMap)
-	if err != nil {
-		return err
-	}
-	annotations[annotationName] = string(bytes)
-	return nil
-}
-
-func parseJoinSubnetAnnotation(nodeAnnotations map[string]string, annotationName string) (map[string]primaryIfAddrAnnotation, error) {
-	annotation, ok := nodeAnnotations[annotationName]
-	if !ok {
-		return nil, newAnnotationNotSetError("could not find %q annotation", annotationName)
-	}
-	joinSubnetsNetworkMap := make(map[string]primaryIfAddrAnnotation)
-	if err := json.Unmarshal([]byte(annotation), &joinSubnetsNetworkMap); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal annotation: %s, err: %w", annotationName, err)
-	}
-
-	if len(joinSubnetsNetworkMap) == 0 {
-		return nil, fmt.Errorf("unexpected empty %s annotation", annotationName)
-	}
-
-	joinsubnetMap := make(map[string]primaryIfAddrAnnotation)
-	for netName, subnetsStr := range joinSubnetsNetworkMap {
-		subnetVal := primaryIfAddrAnnotation{}
-		if subnetsStr.IPv4 == "" && subnetsStr.IPv6 == "" {
-			return nil, fmt.Errorf("annotation: %s does not have any IP information set", annotationName)
-		}
-		if subnetsStr.IPv4 != "" && config.IPv4Mode {
-			ip, ipNet, err := net.ParseCIDR(subnetsStr.IPv4)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse IPv4 address %s from annotation: %s, err: %w",
-					subnetsStr.IPv4, annotationName, err)
-			}
-			joinIP := &net.IPNet{IP: ip, Mask: ipNet.Mask}
-			subnetVal.IPv4 = joinIP.String()
-		}
-		if subnetsStr.IPv6 != "" && config.IPv6Mode {
-			ip, ipNet, err := net.ParseCIDR(subnetsStr.IPv6)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse IPv6 address %s from annotation: %s, err: %w",
-					subnetsStr.IPv4, annotationName, err)
-			}
-			joinIP := &net.IPNet{IP: ip, Mask: ipNet.Mask}
-			subnetVal.IPv6 = joinIP.String()
-		}
-		joinsubnetMap[netName] = subnetVal
-	}
-	return joinsubnetMap, nil
-}
-
 // CreateNodeTransitSwitchPortAddrAnnotation creates the node annotation for the node's Transit switch port addresses.
 func CreateNodeTransitSwitchPortAddrAnnotation(nodeAnnotation map[string]interface{}, nodeIPNetv4,
 	nodeIPNetv6 *net.IPNet) (map[string]interface{}, error) {
-	return createPrimaryIfAddrAnnotation(ovnTransitSwitchPortAddr, nodeAnnotation, nodeIPNetv4, nodeIPNetv6)
+	return createPrimaryIfAddrAnnotation(OvnTransitSwitchPortAddr, nodeAnnotation, nodeIPNetv4, nodeIPNetv6)
 }
 
 func NodeTransitSwitchPortAddrAnnotationChanged(oldNode, newNode *corev1.Node) bool {
-	return oldNode.Annotations[ovnTransitSwitchPortAddr] != newNode.Annotations[ovnTransitSwitchPortAddr]
+	return oldNode.Annotations[OvnTransitSwitchPortAddr] != newNode.Annotations[OvnTransitSwitchPortAddr]
 }
 
 // CreateNodeMasqueradeSubnetAnnotation sets the IPv4 / IPv6 values of the node's Masquerade subnet.
@@ -666,9 +619,9 @@ type ifAddr struct {
 }
 
 type Capacity struct {
-	IPv4 int `json:"ipv4,omitempty"`
-	IPv6 int `json:"ipv6,omitempty"`
-	IP   int `json:"ip,omitempty"`
+	IPv4 *int `json:"ipv4,omitempty"`
+	IPv6 *int `json:"ipv6,omitempty"`
+	IP   *int `json:"ip,omitempty"`
 }
 
 type nodeEgressIPConfiguration struct {
@@ -688,12 +641,12 @@ type ParsedNodeEgressIPConfiguration struct {
 	Capacity Capacity
 }
 
-func GetNodeIfAddrAnnotation(node *corev1.Node) (*primaryIfAddrAnnotation, error) {
+func GetNodeIfAddrAnnotation(node *corev1.Node) (*PrimaryIfAddrAnnotation, error) {
 	nodeIfAddrAnnotation, ok := node.Annotations[OvnNodeIfAddr]
 	if !ok {
 		return nil, newAnnotationNotSetError("%s annotation not found for node %q", OvnNodeIfAddr, node.Name)
 	}
-	nodeIfAddr := &primaryIfAddrAnnotation{}
+	nodeIfAddr := &PrimaryIfAddrAnnotation{}
 	if err := json.Unmarshal([]byte(nodeIfAddrAnnotation), nodeIfAddr); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal annotation: %s for node %q, err: %v", OvnNodeIfAddr, node.Name, err)
 	}
@@ -709,12 +662,13 @@ func ParseNodePrimaryIfAddr(node *corev1.Node) (*ParsedNodeEgressIPConfiguration
 	if err != nil {
 		return nil, err
 	}
+	unlimited := UnlimitedNodeCapacity
 	nodeEgressIPConfig := nodeEgressIPConfiguration{
 		IFAddr: ifAddr(*nodeIfAddr),
 		Capacity: Capacity{
-			IP:   UnlimitedNodeCapacity,
-			IPv4: UnlimitedNodeCapacity,
-			IPv6: UnlimitedNodeCapacity,
+			IP:   &unlimited,
+			IPv4: &unlimited,
+			IPv6: &unlimited,
 		},
 	}
 	parsedEgressIPConfig, err := parseNodeEgressIPConfig(&nodeEgressIPConfig)
@@ -731,7 +685,7 @@ func ParseNodeGatewayRouterLRPAddr(node *corev1.Node) (net.IP, error) {
 	if !ok {
 		return nil, newAnnotationNotSetError("%s annotation not found for node %q", ovnNodeGRLRPAddr, node.Name)
 	}
-	nodeIfAddr := primaryIfAddrAnnotation{}
+	nodeIfAddr := PrimaryIfAddrAnnotation{}
 	if err := json.Unmarshal([]byte(nodeIfAddrAnnotation), &nodeIfAddr); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal annotation: %s for node %q, err: %v", ovnNodeGRLRPAddr, node.Name, err)
 	}
@@ -753,7 +707,7 @@ func parsePrimaryIfAddrAnnotation(node *corev1.Node, annotationName string) ([]*
 	if !ok {
 		return nil, newAnnotationNotSetError("%s annotation not found for node %q", annotationName, node.Name)
 	}
-	nodeIfAddr := primaryIfAddrAnnotation{}
+	nodeIfAddr := PrimaryIfAddrAnnotation{}
 	if err := json.Unmarshal([]byte(nodeIfAddrAnnotation), &nodeIfAddr); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal annotation: %s for node %q, err: %w", annotationName, node.Name, err)
 	}
@@ -767,7 +721,7 @@ func parsePrimaryIfAddrAnnotation(node *corev1.Node, annotationName string) ([]*
 	return ipAddrs, nil
 }
 
-func convertPrimaryIfAddrAnnotationToIPNet(ifAddr primaryIfAddrAnnotation) ([]*net.IPNet, error) {
+func convertPrimaryIfAddrAnnotationToIPNet(ifAddr PrimaryIfAddrAnnotation) ([]*net.IPNet, error) {
 	var ipAddrs []*net.IPNet
 	if ifAddr.IPv4 != "" {
 		ip, ipNet, err := net.ParseCIDR(ifAddr.IPv4)
@@ -793,83 +747,10 @@ func ParseNodeGatewayRouterLRPAddrs(node *corev1.Node) ([]*net.IPNet, error) {
 	return parsePrimaryIfAddrAnnotation(node, ovnNodeGRLRPAddr)
 }
 
-func ParseNodeGatewayRouterJoinNetwork(node *corev1.Node, netName string) (primaryIfAddrAnnotation, error) {
-	var joinSubnetMap map[string]json.RawMessage
-	var ret primaryIfAddrAnnotation
-
-	annotation, ok := node.Annotations[OVNNodeGRLRPAddrs]
-	if !ok {
-		return primaryIfAddrAnnotation{}, newAnnotationNotSetError("could not find %q annotation", OVNNodeGRLRPAddrs)
-	}
-
-	if err := json.Unmarshal([]byte(annotation), &joinSubnetMap); err != nil {
-		return primaryIfAddrAnnotation{}, fmt.Errorf("failed to unmarshal %q annotation on node %s: %v", OVNNodeGRLRPAddrs, node.Name, err)
-	}
-	val, ok := joinSubnetMap[netName]
-	if !ok {
-		return primaryIfAddrAnnotation{}, newAnnotationNotSetError("unable to fetch annotation value on node %s for network %s",
-			node.Name, netName)
-	}
-
-	if err := json.Unmarshal(val, &ret); err != nil {
-		return primaryIfAddrAnnotation{}, fmt.Errorf("failed to unmarshal the %q annotation on node %s for %s network err: %w", OVNNodeGRLRPAddrs, node.Name, netName, err)
-	}
-
-	return ret, nil
-}
-
-// ParseNodeGatewayRouterJoinIPv4 returns the IPv4 address for the node's gateway router port
-// stored in the 'OVNNodeGRLRPAddrs' annotation
-func ParseNodeGatewayRouterJoinIPv4(node *corev1.Node, netName string) (net.IP, error) {
-	primaryIfAddr, err := ParseNodeGatewayRouterJoinNetwork(node, netName)
-	if err != nil {
-		return nil, err
-	}
-	if primaryIfAddr.IPv4 == "" {
-		return nil, fmt.Errorf("failed to find an IPv4 address for gateway route interface in node: %s, net: %s, "+
-			"annotation values: %+v", node, netName, primaryIfAddr)
-	}
-
-	ip, _, err := net.ParseCIDR(primaryIfAddr.IPv4)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse gateway router IPv4 address %s, err: %w", primaryIfAddr.IPv4, err)
-	}
-	return ip, nil
-}
-
-// ParseNodeGatewayRouterJoinIPv6 returns the IPv6 address for the node's gateway router port
-// stored in the 'OVNNodeGRLRPAddrs' annotation
-func ParseNodeGatewayRouterJoinIPv6(node *corev1.Node, netName string) (net.IP, error) {
-	primaryIfAddr, err := ParseNodeGatewayRouterJoinNetwork(node, netName)
-	if err != nil {
-		return nil, err
-	}
-	if primaryIfAddr.IPv6 == "" {
-		return nil, fmt.Errorf("failed to find an IPv6 address for gateway route interface in node: %s, net: %s, "+
-			"annotation values: %+v", node, netName, primaryIfAddr)
-	}
-
-	ip, _, err := net.ParseCIDR(primaryIfAddr.IPv6)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse gateway router IPv6 address %s, err: %w", primaryIfAddr.IPv6, err)
-	}
-	return ip, nil
-}
-
-// ParseNodeGatewayRouterJoinAddrs returns the IPv4 and/or IPv6 addresses for the node's gateway router port
-// stored in the 'OVNNodeGRLRPAddrs' annotation
-func ParseNodeGatewayRouterJoinAddrs(node *corev1.Node, netName string) ([]*net.IPNet, error) {
-	primaryIfAddr, err := ParseNodeGatewayRouterJoinNetwork(node, netName)
-	if err != nil {
-		return nil, err
-	}
-	return convertPrimaryIfAddrAnnotationToIPNet(primaryIfAddr)
-}
-
 // ParseNodeTransitSwitchPortAddrs returns the IPv4 and/or IPv6 addresses for the node's transit switch port
 // stored in the 'ovnTransitSwitchPortAddr' annotation
 func ParseNodeTransitSwitchPortAddrs(node *corev1.Node) ([]*net.IPNet, error) {
-	return parsePrimaryIfAddrAnnotation(node, ovnTransitSwitchPortAddr)
+	return parsePrimaryIfAddrAnnotation(node, OvnTransitSwitchPortAddr)
 }
 
 // ParseNodeMasqueradeSubnet returns the IPv4 and/or IPv6 networks for the node's gateway router port
@@ -901,12 +782,13 @@ func ParseCloudEgressIPConfig(node *corev1.Node) (*ParsedNodeEgressIPConfigurati
 	if !ok {
 		return nil, newAnnotationNotSetError("%s annotation not found for node %q", cloudEgressIPConfigAnnotationKey, node.Name)
 	}
+	unlimited := UnlimitedNodeCapacity
 	nodeEgressIPConfig := []nodeEgressIPConfiguration{
 		{
 			Capacity: Capacity{
-				IP:   UnlimitedNodeCapacity,
-				IPv4: UnlimitedNodeCapacity,
-				IPv6: UnlimitedNodeCapacity,
+				IP:   &unlimited,
+				IPv4: &unlimited,
+				IPv6: &unlimited,
 			},
 		},
 	}
@@ -1002,38 +884,6 @@ func ParseNodeHostCIDRs(node *corev1.Node) (sets.Set[string], error) {
 	return sets.New(cfg...), nil
 }
 
-// ParseNodeHostIPDropNetMask returns the parsed host IP addresses found on a node's host CIDR annotation. Removes the mask.
-func ParseNodeHostIPDropNetMask(node *corev1.Node) (sets.Set[string], error) {
-	nodeIfAddrAnnotation, ok := node.Annotations[OvnNodeIfAddr]
-	if !ok {
-		return nil, newAnnotationNotSetError("%s annotation not found for node %q", OvnNodeIfAddr, node.Name)
-	}
-	nodeIfAddr := &primaryIfAddrAnnotation{}
-	if err := json.Unmarshal([]byte(nodeIfAddrAnnotation), nodeIfAddr); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal annotation: %s for node %q, err: %v", OvnNodeIfAddr, node.Name, err)
-	}
-
-	var cfg []string
-	if nodeIfAddr.IPv4 != "" {
-		cfg = append(cfg, nodeIfAddr.IPv4)
-	}
-	if nodeIfAddr.IPv6 != "" {
-		cfg = append(cfg, nodeIfAddr.IPv6)
-	}
-	if len(cfg) == 0 {
-		return nil, fmt.Errorf("node: %q does not have any IP information set", node.Name)
-	}
-
-	for i, cidr := range cfg {
-		ip, _, err := net.ParseCIDR(cidr)
-		if err != nil || ip == nil {
-			return nil, fmt.Errorf("failed to parse node host cidr: %v", err)
-		}
-		cfg[i] = ip.String()
-	}
-	return sets.New(cfg...), nil
-}
-
 // ParseNodeHostCIDRsDropNetMask returns the parsed host IP addresses found on a node's host CIDR annotation. Removes the mask.
 func ParseNodeHostCIDRsDropNetMask(node *corev1.Node) (sets.Set[string], error) {
 	addrAnnotation, ok := node.Annotations[OVNNodeHostCIDRs]
@@ -1086,15 +936,45 @@ func ParseNodeHostCIDRsExcludeOVNNetworks(node *corev1.Node) ([]string, error) {
 }
 
 func ParseNodeHostCIDRsList(node *corev1.Node) ([]string, error) {
-	addrAnnotation, ok := node.Annotations[OVNNodeHostCIDRs]
+	return parseNodeAnnotationList(node, OVNNodeHostCIDRs)
+}
+
+func ParseNodeDontSNATSubnetsList(node *corev1.Node) ([]string, error) {
+	return parseNodeAnnotationList(node, OvnNodeDontSNATSubnets)
+}
+
+// NodeDontSNATSubnetAnnotationChanged returns true if the OvnNodeDontSNATSubnets in the corev1.Nodes doesn't match
+func NodeDontSNATSubnetAnnotationChanged(oldNode, newNode *corev1.Node) bool {
+	oldVal, oldOk := oldNode.Annotations[OvnNodeDontSNATSubnets]
+	newVal, newOk := newNode.Annotations[OvnNodeDontSNATSubnets]
+
+	if oldOk != newOk {
+		return true
+	}
+
+	if oldOk && newOk && oldVal != newVal {
+		return true
+	}
+
+	return false
+}
+
+// NodeDontSNATSubnetAnnotationExist returns true OvnNodeDontSNATSubnets annotation key exists in node annotation
+func NodeDontSNATSubnetAnnotationExist(node *corev1.Node) bool {
+	_, ok := node.Annotations[OvnNodeDontSNATSubnets]
+	return ok
+}
+
+func parseNodeAnnotationList(node *corev1.Node, annotationKey string) ([]string, error) {
+	annotationValue, ok := node.Annotations[annotationKey]
 	if !ok {
-		return nil, newAnnotationNotSetError("%s annotation not found for node %q", OVNNodeHostCIDRs, node.Name)
+		return []string{}, nil
 	}
 
 	var cfg []string
-	if err := json.Unmarshal([]byte(addrAnnotation), &cfg); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal host cidrs annotation %s for node %q: %v",
-			addrAnnotation, node.Name, err)
+	if err := json.Unmarshal([]byte(annotationValue), &cfg); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal %s annotation %s for node %q: %v",
+			annotationKey, annotationValue, node.Name, err)
 	}
 	return cfg, nil
 }
@@ -1227,62 +1107,44 @@ func GetSecondaryHostNetworkContainingIP(node *corev1.Node, ip net.IP) (string, 
 	return match.String(), nil
 }
 
-// UpdateNodeIDAnnotation updates the ovnNodeID annotation with the node id in the annotations map
+// UpdateNodeIDAnnotation updates the OvnNodeID annotation with the node id in the annotations map
 // and returns it.
 func UpdateNodeIDAnnotation(annotations map[string]interface{}, nodeID int) map[string]interface{} {
 	if annotations == nil {
 		annotations = make(map[string]interface{})
 	}
 
-	annotations[ovnNodeID] = strconv.Itoa(nodeID)
+	annotations[OvnNodeID] = strconv.Itoa(nodeID)
 	return annotations
 }
 
-// GetNodeID returns the id of the node set in the 'ovnNodeID' node annotation.
-// Returns InvalidNodeID (-1) if the 'ovnNodeID' node annotation is not set or if the value is
-// not an integer value.
-func GetNodeID(node *corev1.Node) int {
-	nodeID, ok := node.Annotations[ovnNodeID]
+// GetNodeID returns the id of the node set in the 'OvnNodeID' node annotation.
+// Returns InvalidNodeID (-1) if the 'OvnNodeID' node annotation is not set or if the value is
+// not an integer value. On error also returns:
+// - NewAnnotationNotSetError if the annotation is missing
+// - strconv.Atoi error if the annotation value is not a valid integer
+func GetNodeID(node *corev1.Node) (int, error) {
+	nodeID, ok := node.Annotations[OvnNodeID]
 	if !ok {
-		return InvalidNodeID
+		return InvalidNodeID, newAnnotationNotSetError("%s annotation not found for node %s", OvnNodeID, node.Name)
 	}
 
 	id, err := strconv.Atoi(nodeID)
 	if err != nil {
-		return InvalidNodeID
+		return InvalidNodeID, err
 	}
-	return id
+	return id, nil
 }
 
-// NodeIDAnnotationChanged returns true if the ovnNodeID in the corev1.Nodes doesn't match
+// NodeIDAnnotationChanged returns true if the OvnNodeID in the corev1.Nodes doesn't match
 func NodeIDAnnotationChanged(oldNode, newNode *corev1.Node) bool {
-	return oldNode.Annotations[ovnNodeID] != newNode.Annotations[ovnNodeID]
+	return oldNode.Annotations[OvnNodeID] != newNode.Annotations[OvnNodeID]
 }
 
 // SetNodeZone sets the node's zone in the 'ovnNodeZoneName' node annotation.
 func SetNodeZone(nodeAnnotator kube.Annotator, zoneName string) error {
 	return nodeAnnotator.Set(OvnNodeZoneName, zoneName)
 }
-
-/** HACK BEGIN **/
-// TODO(tssurya): Remove this a few months from now
-// SetNodeZoneMigrated sets the node's zone in the 'ovnNodeMigratedZoneName' node annotation.
-func SetNodeZoneMigrated(nodeAnnotator kube.Annotator, zoneName string) error {
-	return nodeAnnotator.Set(OvnNodeMigratedZoneName, zoneName)
-}
-
-// HasNodeMigratedZone returns true if node has its ovnNodeMigratedZoneName set already
-func HasNodeMigratedZone(node *corev1.Node) bool {
-	_, ok := node.Annotations[OvnNodeMigratedZoneName]
-	return ok
-}
-
-// NodeMigratedZoneAnnotationChanged returns true if the ovnNodeMigratedZoneName annotation changed for the node
-func NodeMigratedZoneAnnotationChanged(oldNode, newNode *corev1.Node) bool {
-	return oldNode.Annotations[OvnNodeMigratedZoneName] != newNode.Annotations[OvnNodeMigratedZoneName]
-}
-
-/** HACK END **/
 
 // GetNodeZone returns the zone of the node set in the 'ovnNodeZoneName' node annotation.
 // If the annotation is not set, it returns the 'default' zone name.
@@ -1307,7 +1169,13 @@ func parseNetworkMapAnnotation(nodeAnnotations map[string]string, annotationName
 	if !ok {
 		return nil, newAnnotationNotSetError("could not find %q annotation", annotationName)
 	}
+	return parseNetworkMapAnnotationValue(annotationName, annotation)
+}
 
+// parseNetworkMapAnnotationValue decodes annotation as a JSON object of
+// `networkName -> string value` pairs and returns it as a Go map.
+// It returns an error when JSON decoding fails or when the parsed map is empty.
+func parseNetworkMapAnnotationValue(annotationName, annotation string) (map[string]string, error) {
 	idsStrMap := map[string]string{}
 	ids := make(map[string]string)
 	if err := json.Unmarshal([]byte(annotation), &ids); err != nil {
@@ -1317,25 +1185,23 @@ func parseNetworkMapAnnotation(nodeAnnotations map[string]string, annotationName
 	for netName, v := range ids {
 		idsStrMap[netName] = v
 	}
-
 	if len(idsStrMap) == 0 {
 		return nil, fmt.Errorf("unexpected empty %s annotation", annotationName)
 	}
-
 	return idsStrMap, nil
 }
 
-// ParseNetworkIDAnnotation parses the 'ovnNetworkIDs' annotation for the specified
+// ParseNetworkIDAnnotation parses the 'OvnNetworkIDs' annotation for the specified
 // network in 'netName' and returns the network id.
 func ParseNetworkIDAnnotation(node *corev1.Node, netName string) (int, error) {
-	networkIDsMap, err := parseNetworkMapAnnotation(node.Annotations, ovnNetworkIDs)
+	networkIDsMap, err := parseNetworkMapAnnotation(node.Annotations, OvnNetworkIDs)
 	if err != nil {
-		return InvalidID, err
+		return types.InvalidID, err
 	}
 
 	networkID, ok := networkIDsMap[netName]
 	if !ok {
-		return InvalidID, newAnnotationNotSetError("node %q has no %q annotation for network %s", node.Name, ovnNetworkIDs, netName)
+		return types.InvalidID, newAnnotationNotSetError("node %q has no %q annotation for network %s", node.Name, OvnNetworkIDs, netName)
 	}
 
 	return strconv.Atoi(networkID)
@@ -1344,7 +1210,7 @@ func ParseNetworkIDAnnotation(node *corev1.Node, netName string) (int, error) {
 // updateNetworkAnnotation updates the provided annotationName in the 'annotations' map
 // with the provided ID in 'annotationName's value.  If 'id' is InvalidID (-1)
 // it deletes the annotationName annotation from the map.
-// It is currently used for ovnNetworkIDs annotation updates
+// It is currently used for OvnNetworkIDs annotation updates
 func updateNetworkAnnotation(annotations map[string]string, netName string, id int, annotationName string) error {
 	var bytes []byte
 
@@ -1360,7 +1226,7 @@ func updateNetworkAnnotation(annotations map[string]string, netName string, id i
 	}
 
 	// add or delete network id of the specified network
-	if id == InvalidID {
+	if id == types.InvalidID {
 		delete(idsMap, netName)
 	} else {
 		idsMap[netName] = strconv.Itoa(id)
@@ -1385,13 +1251,13 @@ func updateNetworkAnnotation(annotations map[string]string, netName string, id i
 	return nil
 }
 
-// UpdateNetworkIDAnnotation updates the ovnNetworkIDs annotation for the network name 'netName' with the network id 'networkID'.
+// UpdateNetworkIDAnnotation updates the OvnNetworkIDs annotation for the network name 'netName' with the network id 'networkID'.
 // If 'networkID' is invalid network ID (-1), then it deletes that network from the network ids annotation.
 func UpdateNetworkIDAnnotation(annotations map[string]string, netName string, networkID int) (map[string]string, error) {
 	if annotations == nil {
 		annotations = map[string]string{}
 	}
-	err := updateNetworkAnnotation(annotations, netName, networkID, ovnNetworkIDs)
+	err := updateNetworkAnnotation(annotations, netName, networkID, OvnNetworkIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -1401,7 +1267,7 @@ func UpdateNetworkIDAnnotation(annotations map[string]string, netName string, ne
 // GetNodeNetworkIDsAnnotationNetworkIDs parses the "k8s.ovn.org/network-ids" annotation
 // on a node and returns the map of network name and ids.
 func GetNodeNetworkIDsAnnotationNetworkIDs(node *corev1.Node) (map[string]int, error) {
-	networkIDsStrMap, err := parseNetworkMapAnnotation(node.Annotations, ovnNetworkIDs)
+	networkIDsStrMap, err := parseNetworkMapAnnotation(node.Annotations, OvnNetworkIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -1417,7 +1283,7 @@ func GetNodeNetworkIDsAnnotationNetworkIDs(node *corev1.Node) (map[string]int, e
 	return networkIDsMap, nil
 }
 
-// NodeNetworkIDAnnotationChanged returns true if the ovnNetworkIDs annotation in the corev1.Nodes doesn't match
+// NodeNetworkIDAnnotationChanged returns true if the OvnNetworkIDs annotation in the corev1.Nodes doesn't match
 func NodeNetworkIDAnnotationChanged(oldNode, newNode *corev1.Node, netName string) bool {
 	oldNodeNetID, _ := ParseNetworkIDAnnotation(oldNode, netName)
 	newNodeNetID, _ := ParseNetworkIDAnnotation(newNode, netName)
@@ -1449,22 +1315,62 @@ func filterIPVersion(cidrs []netip.Prefix, v6 bool) []netip.Prefix {
 	return validCIDRs
 }
 
-// GetNetworkID will retrieve the network id for the specified network from the
-// first node that contains that network at the network id annotations, it will
-// return at the first ocurrence, rest of nodes will not be parsed.
-func GetNetworkID(nodes []*corev1.Node, nInfo NetInfo) (int, error) {
-	for _, node := range nodes {
-		var err error
-		networkID, err := ParseNetworkIDAnnotation(node, nInfo.GetNetworkName())
-		if err != nil {
-			if IsAnnotationNotSetError(err) {
-				continue
-			}
-			return InvalidID, err
-		}
-		if networkID != InvalidID {
-			return networkID, nil
-		}
+func SetNodeEncapIPs(nodeAnnotator kube.Annotator, encapips sets.Set[string]) error {
+	return nodeAnnotator.Set(OVNNodeEncapIPs, sets.List(encapips))
+}
+
+// ParseNodeEncapIPsAnnotation returns the encap IPs set on a node
+func ParseNodeEncapIPsAnnotation(node *corev1.Node) ([]string, error) {
+	encapIPsAnnotation, ok := node.Annotations[OVNNodeEncapIPs]
+	if !ok {
+		return nil, newAnnotationNotSetError("%s annotation not found for node %q", OVNNodeEncapIPs, node.Name)
 	}
-	return InvalidID, fmt.Errorf("missing network id for network '%s'", nInfo.GetNetworkName())
+
+	var encapIPs []string
+	if err := json.Unmarshal([]byte(encapIPsAnnotation), &encapIPs); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal %s annotation for node %q: %v",
+			encapIPsAnnotation, node.Name, err)
+	}
+
+	return encapIPs, nil
+}
+
+func NodeEncapIPsChanged(oldNode, newNode *corev1.Node) bool {
+	return oldNode.Annotations[OVNNodeEncapIPs] != newNode.Annotations[OVNNodeEncapIPs]
+}
+
+// SetNodePrimaryDPUHostAddr sets the primary DPU host address annotation on a node
+func SetNodePrimaryDPUHostAddr(nodeAnnotator kube.Annotator, ifAddrs []*net.IPNet) error {
+	nodeIPNetv4, _ := MatchFirstIPNetFamily(false, ifAddrs)
+	nodeIPNetv6, _ := MatchFirstIPNetFamily(true, ifAddrs)
+
+	ifAddrAnnotation := ifAddr{}
+	if nodeIPNetv4 != nil {
+		ifAddrAnnotation.IPv4 = nodeIPNetv4.String()
+	}
+	if nodeIPNetv6 != nil {
+		ifAddrAnnotation.IPv6 = nodeIPNetv6.String()
+	}
+	return nodeAnnotator.Set(OVNNodePrimaryDPUHostAddr, ifAddrAnnotation)
+}
+
+// NodePrimaryDPUHostAddrAnnotationChanged returns true if the primary DPU host address annotation changed
+func NodePrimaryDPUHostAddrAnnotationChanged(oldNode, newNode *corev1.Node) bool {
+	return oldNode.Annotations[OVNNodePrimaryDPUHostAddr] != newNode.Annotations[OVNNodePrimaryDPUHostAddr]
+}
+
+// GetNodePrimaryDPUHostAddrAnnotation returns the raw primary DPU host address annotation from a node
+func GetNodePrimaryDPUHostAddrAnnotation(node *corev1.Node) (*ifAddr, error) {
+	addrAnnotation, ok := node.Annotations[OVNNodePrimaryDPUHostAddr]
+	if !ok {
+		return nil, newAnnotationNotSetError("%s annotation not found for node %q", OVNNodePrimaryDPUHostAddr, node.Name)
+	}
+	nodeIfAddr := &ifAddr{}
+	if err := json.Unmarshal([]byte(addrAnnotation), nodeIfAddr); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal annotation: %s for node %q, err: %v", OVNNodePrimaryDPUHostAddr, node.Name, err)
+	}
+	if nodeIfAddr.IPv4 == "" && nodeIfAddr.IPv6 == "" {
+		return nil, fmt.Errorf("node: %q does not have any IP information set", node.Name)
+	}
+	return nodeIfAddr, nil
 }

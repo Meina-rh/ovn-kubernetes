@@ -2,6 +2,7 @@ package vrfmanager
 
 import (
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -11,9 +12,9 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/routemanager"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
-	utilerrors "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util/errors"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/routemanager"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
+	utilerrors "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util/errors"
 )
 
 // reconcile period for vrf manager, this would kick in for every 60 seconds if there is no
@@ -216,11 +217,11 @@ func (vrfm *Controller) sync(vrf vrf) error {
 		}
 	}
 	if len(vrf.managedSlave) > 0 {
-		existingSlaves, err := getSlaveInterfaceNamesForVRF(vrfLink)
+		alreadyEnslaved, err := isInterfaceSlaveOfVRF(vrf.managedSlave, vrfLink.Attrs().Index)
 		if err != nil {
-			return fmt.Errorf("failed to get existing slaves for VRF device %s, err: %v", vrfLink.Attrs().Name, err)
+			return fmt.Errorf("failed to check if %s is slave of VRF device %s, err: %v", vrf.managedSlave, vrfLink.Attrs().Name, err)
 		}
-		if !existingSlaves.Has(vrf.managedSlave) {
+		if !alreadyEnslaved {
 			if err = enslaveInterfaceToVRF(vrf.name, vrf.managedSlave); err != nil {
 				return fmt.Errorf("failed to enslave interface %s into VRF device: %s, err: %v", vrf.managedSlave, vrf.name, err)
 			}
@@ -295,6 +296,54 @@ func (vrfm *Controller) AddVRFRoutes(name string, routes []netlink.Route) error 
 	vrfDev.routes = append(vrfDev.routes, routes...)
 
 	return vrfm.sync(vrfDev)
+}
+
+// DeleteVRFRoutes deletes a set of routes from a VRF
+func (vrfm *Controller) DeleteVRFRoutes(name string, routes []netlink.Route) error {
+	vrfm.mu.Lock()
+	defer vrfm.mu.Unlock()
+
+	vrfLink, err := util.GetNetLinkOps().LinkByName(name)
+	if err != nil {
+		return fmt.Errorf("failed to retrieve VRF device %s, err: %v", name, err)
+	}
+
+	vrf, ok := vrfm.vrfs[vrfLink.Attrs().Index]
+	if !ok {
+		return fmt.Errorf("failed to find VRF %s", name)
+	}
+	type route struct {
+		LinkIndex int
+		Dst       string
+		Table     int
+	}
+	deleteRoutesRequested := sets.New[route]()
+	for _, r := range routes {
+		deleteRoutesRequested.Insert(route{
+			LinkIndex: r.LinkIndex,
+			Dst:       r.Dst.String(),
+			Table:     r.Table,
+		})
+	}
+
+	vrf.routes = slices.DeleteFunc(vrf.routes, func(r netlink.Route) bool {
+		if err != nil {
+			return false
+		}
+		delete := deleteRoutesRequested.Has(
+			route{
+				LinkIndex: r.LinkIndex,
+				Dst:       r.Dst.String(),
+				Table:     r.Table,
+			})
+		if !delete {
+			return false
+		}
+		err = vrfm.routeManager.Del(r)
+		return err == nil
+	})
+	vrfm.vrfs[vrfLink.Attrs().Index] = vrf
+	return err
 }
 
 // Repair deletes stale VRF device(s) on the host. This helps remove
@@ -376,18 +425,16 @@ func (vrfm *Controller) deleteVRF(link netlink.Link) error {
 	return util.GetNetLinkOps().LinkDelete(link)
 }
 
-func getSlaveInterfaceNamesForVRF(vrfLink netlink.Link) (sets.Set[string], error) {
-	links, err := util.GetNetLinkOps().LinkList()
+// isInterfaceSlaveOfVRF checks if a specific interface is enslaved to a VRF
+func isInterfaceSlaveOfVRF(ifName string, vrfIndex int) (bool, error) {
+	link, err := util.GetNetLinkOps().LinkByName(ifName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list links on the node, err: %v", err)
-	}
-	enslavedInterfaces := make(sets.Set[string])
-	for _, link := range links {
-		if link.Attrs().MasterIndex == vrfLink.Attrs().Index {
-			enslavedInterfaces.Insert(link.Attrs().Name)
+		if util.GetNetLinkOps().IsLinkNotFoundError(err) {
+			return false, nil
 		}
+		return false, fmt.Errorf("failed to get link %s, err: %v", ifName, err)
 	}
-	return enslavedInterfaces, nil
+	return link.Attrs().MasterIndex == vrfIndex, nil
 }
 
 func enslaveInterfaceToVRF(vrfName, ifName string) error {

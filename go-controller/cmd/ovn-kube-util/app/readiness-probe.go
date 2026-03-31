@@ -9,7 +9,7 @@ import (
 
 	kexec "k8s.io/utils/exec"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 type readinessFunc func(string) error
@@ -156,7 +156,7 @@ func ovnNodeReadiness(_ string) error {
 	confFile := "/etc/cni/net.d/10-ovn-kubernetes.conf"
 	_, err := os.Stat(confFile)
 	if os.IsNotExist(err) {
-		return fmt.Errorf("OVN Kubernetes config file %q doesn't exist", confFile)
+		return fmt.Errorf("OVN-Kubernetes config file %q doesn't exist", confFile)
 	}
 	return nil
 }

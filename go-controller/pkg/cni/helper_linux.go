@@ -20,13 +20,15 @@ import (
 	"github.com/vishvananda/netlink"
 
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/knftables"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 type CNIPluginLibOps interface {
-	AddRoute(ipn *net.IPNet, gw net.IP, dev netlink.Link, mtu int) error
+	AddRoute(ipn *net.IPNet, gw net.IP, dev netlink.Link, mtu, table int) error
+	ReplaceRouteECMP(ipn *net.IPNet, gw net.IP, devs []netlink.Link, mtu int) error
 	SetupVeth(contVethName string, hostVethName string, mtu int, contVethMac string, hostNS ns.NetNS) (net.Interface, net.Interface, error)
 }
 
@@ -34,16 +36,34 @@ type defaultCNIPluginLibOps struct{}
 
 var cniPluginLibOps CNIPluginLibOps = &defaultCNIPluginLibOps{}
 
-func (defaultCNIPluginLibOps) AddRoute(ipn *net.IPNet, gw net.IP, dev netlink.Link, mtu int) error {
+func (defaultCNIPluginLibOps) AddRoute(ipn *net.IPNet, gw net.IP, dev netlink.Link, mtu, table int) error {
 	route := &netlink.Route{
 		LinkIndex: dev.Attrs().Index,
 		Scope:     netlink.SCOPE_UNIVERSE,
 		Dst:       ipn,
 		Gw:        gw,
 		MTU:       mtu,
+		Table:     table,
 	}
 
 	return util.GetNetLinkOps().RouteAdd(route)
+}
+
+func (defaultCNIPluginLibOps) ReplaceRouteECMP(ipn *net.IPNet, gw net.IP, devs []netlink.Link, mtu int) error {
+	ecmpRoute := &netlink.Route{
+		Dst: ipn,
+		MTU: mtu,
+	}
+
+	ecmpRoute.MultiPath = make([]*netlink.NexthopInfo, len(devs))
+	for i, dev := range devs {
+		ecmpRoute.MultiPath[i] = &netlink.NexthopInfo{
+			LinkIndex: dev.Attrs().Index,
+			Gw:        gw,
+			Hops:      0, // Weight (0 means weight of 1)
+		}
+	}
+	return util.GetNetLinkOps().RouteReplace(ecmpRoute)
 }
 
 func (defaultCNIPluginLibOps) SetupVeth(contVethName string, hostVethName string, mtu int, contVethMac string, hostNS ns.NetNS) (net.Interface, net.Interface, error) {
@@ -191,13 +211,100 @@ func setupNetwork(link netlink.Link, ifInfo *PodInterfaceInfo) error {
 		}
 	}
 	for _, gw := range ifInfo.Gateways {
-		if err := cniPluginLibOps.AddRoute(nil, gw, link, ifInfo.RoutableMTU); err != nil {
+		if err := cniPluginLibOps.AddRoute(nil, gw, link, ifInfo.RoutableMTU, 0); err != nil {
 			return fmt.Errorf("failed to add gateway route to link '%s': %v", link.Attrs().Name, err)
 		}
 	}
+
+	// all pod links of the same secondary UDN up to the current one
+	var links []netlink.Link
+	var iptableNum int
+
+	if len(ifInfo.PodIfNamesOfSameNAD) != 0 {
+		// this is a pod with multiple interfaces of the same non-primary UDN, we need to configure the following sysctl configuration
+		// stop ARP flux and stop RP filter drop from happening
+		//   sysctl -w net.ipv4.conf.<linkName>.arp_ignore=1 # only reply to ARP requests if its sent to the IP on this interface
+		//   sysctl -w net.ipv4.conf.<linkName>.arp_announce=2 # when sending ARP use the IP that belongs to this interface
+		//   sysctl -w net.ipv4.conf.<linkName>.rp_filter=2 # allow reverse path filter check to pass if there is any route to the source
+		linkName := link.Attrs().Name
+		if err := setSysctl(fmt.Sprintf("/proc/sys/net/ipv4/conf/%s/arp_ignore", linkName), 1); err != nil {
+			return fmt.Errorf("failed to set arp_ignore for %s: %v", linkName, err)
+		}
+		if err := setSysctl(fmt.Sprintf("/proc/sys/net/ipv4/conf/%s/arp_announce", linkName), 2); err != nil {
+			return fmt.Errorf("failed to set arp_announce for %s: %v", linkName, err)
+		}
+		if err := setSysctl(fmt.Sprintf("/proc/sys/net/ipv4/conf/%s/rp_filter", linkName), 2); err != nil {
+			return fmt.Errorf("failed to set rp_filter for %s: %v", linkName, err)
+		}
+
+		if len(ifInfo.Routes) != 0 {
+			// needs ip table for each Pod interface of the same secondary UDN, table number start from 100
+			iptableNum = 100 + link.Attrs().Index
+
+			// ECMP routes are needed
+			// get all the Pod interface names of the same nadName
+			// up to the current link name. This is used for configuring ECMP routes via multiple pod interfaces
+			links = make([]netlink.Link, 0, len(ifInfo.PodIfNamesOfSameNAD))
+			for _, ifName := range ifInfo.PodIfNamesOfSameNAD {
+				if ifName == link.Attrs().Name {
+					// loop all pod interfaces of the same secondary UDN until the current pod interface
+					links = append(links, link)
+					break
+				}
+				ifLink, err := util.GetNetLinkOps().LinkByName(ifName)
+				if err != nil {
+					return fmt.Errorf("failed to lookup pod interface %s when setup route for link %s: %v", ifName, link.Attrs().Name, err)
+				}
+				links = append(links, ifLink)
+			}
+
+			// ip rules are needed to force traffic from an ip to egress the correct interface via a route table for that interface:
+			//   ip rule add from <IP_on_this_interface> table <iptableNum>
+			for _, ip := range ifInfo.IPs {
+				rule := netlink.NewRule()
+				rule.Src = util.GetIPNetFullMaskFromIP(ip.IP)
+				rule.Table = iptableNum
+				if err := util.GetNetLinkOps().RuleAdd(rule); err != nil {
+					return fmt.Errorf("failed to add IP rule for %s to table %d: %v", ip.IP, iptableNum, err)
+				}
+
+				// add scope link route to the specific table
+				route := &netlink.Route{
+					LinkIndex: link.Attrs().Index,
+					Scope:     netlink.SCOPE_LINK,
+					Dst:       util.IPsToNetworkIPs(ip)[0],
+					Table:     iptableNum,
+				}
+				if err := util.GetNetLinkOps().RouteAdd(route); err != nil {
+					return fmt.Errorf("failed to add link scope route to %v via %v to table %v: %v", ip, linkName, iptableNum, err)
+				}
+			}
+		}
+	}
+
 	for _, route := range ifInfo.Routes {
-		if err := cniPluginLibOps.AddRoute(route.Dest, route.NextHop, link, ifInfo.RoutableMTU); err != nil {
-			return fmt.Errorf("failed to add pod route %v via %v: %v", route.Dest, route.NextHop, err)
+		if len(ifInfo.PodIfNamesOfSameNAD) == 0 {
+			// if there is no other interface of the same NAD, just add route directly
+			if err := cniPluginLibOps.AddRoute(route.Dest, route.NextHop, link, ifInfo.RoutableMTU, 0); err != nil {
+				return fmt.Errorf("failed to add pod route %v via %v: %v", route.Dest, route.NextHop, err)
+			}
+		} else {
+			if len(links) == 1 {
+				// if this is the first pod interface of this NAD, just add route directly
+				if err := cniPluginLibOps.AddRoute(route.Dest, route.NextHop, link, ifInfo.RoutableMTU, 0); err != nil {
+					return fmt.Errorf("failed to add pod route %v via %v: %v", route.Dest, route.NextHop, err)
+				}
+			} else {
+				// otherwise replace it with ECMP routes
+				if err := cniPluginLibOps.ReplaceRouteECMP(route.Dest, route.NextHop, links, ifInfo.RoutableMTU); err != nil {
+					return fmt.Errorf("failed to replace pod route %v via %v through links %v: %v", route.Dest, route.NextHop, links, err)
+				}
+			}
+
+			// add ECMP route to specific IP route table
+			if err := cniPluginLibOps.AddRoute(route.Dest, route.NextHop, link, ifInfo.RoutableMTU, iptableNum); err != nil {
+				return fmt.Errorf("failed to add pod route %v nexthop %v via %v table %v: %v", route.Dest, route.NextHop, link.Attrs().Name, iptableNum, err)
+			}
 		}
 	}
 
@@ -250,6 +357,13 @@ func setupInterface(netns ns.NetNS, containerID, ifName string, ifInfo *PodInter
 		// to generate the unique host interface name, postfix it with the podInterface index for non-default network
 		if ifInfo.NetName != types.DefaultNetworkName {
 			ifnameSuffix = fmt.Sprintf("_%d", containerVeth.Index)
+		}
+
+		// If we have the ipv6 gateway LLA then this is a primary layer2 UDN
+		if len(ifInfo.GatewayIPv6LLA) > 0 {
+			if err = setupIngressFilter(ifName, ifInfo.GatewayIPv6LLA.String()); err != nil {
+				return err
+			}
 		}
 
 		return nil
@@ -358,11 +472,6 @@ func setupSriovInterface(netns ns.NetNS, containerID, ifName string, ifInfo *Pod
 				return nil, nil, err
 			}
 		}
-		// 4. make sure it's not a port managed by OVS to avoid conflicts
-		_, err = ovsExec("--if-exists", "del-port", hostRepName)
-		if err != nil {
-			return nil, nil, err
-		}
 
 		hostIface.Name = hostRepName
 		link, err := util.GetNetLinkOps().LinkByName(hostIface.Name)
@@ -370,17 +479,12 @@ func setupSriovInterface(netns ns.NetNS, containerID, ifName string, ifInfo *Pod
 			return nil, nil, err
 		}
 
-		err = util.GetNetLinkOps().LinkSetUp(link)
-		if err != nil {
-			return nil, nil, err
-		}
-
 		hostIface.Mac = link.Attrs().HardwareAddr.String()
-
-		// 5. set MTU on the representor
-		if err = util.GetNetLinkOps().LinkSetMTU(link, ifInfo.MTU); err != nil {
-			return nil, nil, fmt.Errorf("failed to set MTU on %s: %v", hostIface.Name, err)
-		}
+		// Do not bring the representor up or set MTU here. In full mode the representor must be
+		// added to br-int first, then brought up (and set MTU) in ConfigureOVS after the port
+		// is added to br-int. This avoids a race where an old pod's CmdDel could bring down the
+		// same VF representor and remove it from br-int after we brought the link up but before
+		// we added it to br-int.
 	}
 
 	return hostIface, contIface, nil
@@ -420,12 +524,12 @@ func getPfEncapIP(deviceID string) (string, error) {
 }
 
 // ConfigureOVS performs OVS configurations in order to set up Pod networking
-func ConfigureOVS(ctx context.Context, namespace, podName, hostIfaceName string,
+func ConfigureOVS(ctx context.Context, namespace, podName, podIfName, hostIfaceName string,
 	ifInfo *PodInterfaceInfo, sandboxID, deviceID string, getter PodInfoGetter) error {
 
 	ifaceID := util.GetIfaceId(namespace, podName)
 	if ifInfo.NetName != types.DefaultNetworkName {
-		ifaceID = util.GetSecondaryNetworkIfaceId(namespace, podName, ifInfo.NADName)
+		ifaceID = util.GetUDNIfaceId(namespace, podName, ifInfo.NADKey)
 	}
 	initialPodUID := ifInfo.PodUID
 	ipStrs := make([]string, len(ifInfo.IPs))
@@ -439,7 +543,7 @@ func ConfigureOVS(ctx context.Context, namespace, podName, hostIfaceName string,
 	}
 
 	klog.Infof("ConfigureOVS: namespace: %s, podName: %s, hostIfaceName: %s, network: %s, NAD %s, SandboxID: %q, PCI device ID: %s, UID: %q, MAC: %s, IPs: %v",
-		namespace, podName, hostIfaceName, ifInfo.NetName, ifInfo.NADName, sandboxID, deviceID, initialPodUID, ifInfo.MAC, ipStrs)
+		namespace, podName, hostIfaceName, ifInfo.NetName, ifInfo.NADKey, sandboxID, deviceID, initialPodUID, ifInfo.MAC, ipStrs)
 
 	// Find and remove any existing OVS port with this iface-id. Pods can
 	// have multiple sandboxes if some are waiting for garbage collection,
@@ -462,16 +566,16 @@ func ConfigureOVS(ctx context.Context, namespace, podName, hostIfaceName string,
 	if err == nil && len(extIds) == 1 {
 		extId := extIds[0]
 		ifaceIDStr := util.GetExternalIDValByKey(extId, "iface-id")
-		nadNameString := util.GetExternalIDValByKey(extId, types.NADExternalID)
-		// if NADExternalID does not exists, it is default network
-		if nadNameString == "" {
-			nadNameString = types.DefaultNetworkName
+		nadKeyString := util.GetExternalIDValByKey(extId, types.NADExternalID)
+		// if NADExternalID does not exist, it is default network
+		if nadKeyString == "" {
+			nadKeyString = types.DefaultNetworkName
 		}
 		if ifaceIDStr != ifaceID {
 			return fmt.Errorf("OVS port %s was added for iface-id (%s), now readding it for (%s)", hostIfaceName, ifaceIDStr, ifaceID)
 		}
-		if nadNameString != ifInfo.NADName {
-			return fmt.Errorf("OVS port %s was added for NAD (%s), expect (%s)", hostIfaceName, nadNameString, ifInfo.NADName)
+		if nadKeyString != ifInfo.NADKey {
+			return fmt.Errorf("OVS port %s was added for NAD (%s), expect (%s)", hostIfaceName, nadKeyString, ifInfo.NADKey)
 		}
 	}
 
@@ -484,6 +588,11 @@ func ConfigureOVS(ctx context.Context, namespace, podName, hostIfaceName string,
 		fmt.Sprintf("external_ids:iface-id=%s", ifaceID),
 		fmt.Sprintf("external_ids:iface-id-ver=%s", initialPodUID),
 		fmt.Sprintf("external_ids:sandbox=%s", sandboxID),
+	}
+
+	// pod interface name, used to identify CNI request with the same NAD
+	if podIfName != "" {
+		ovsArgs = append(ovsArgs, fmt.Sprintf("external_ids:pod-if-name=%s", podIfName))
 	}
 
 	// In case of multi-vtep, host has multipe NICs and each NIC has a VTEP interface, the mapping
@@ -523,14 +632,14 @@ func ConfigureOVS(ctx context.Context, namespace, podName, hostIfaceName string,
 	}
 
 	if len(ifInfo.NetdevName) != 0 {
-		// NOTE: For SF representor same external_id is used due to https://github.com/ovn-org/ovn-kubernetes/pull/3054
+		// NOTE: For SF representor same external_id is used due to https://github.com/ovn-kubernetes/ovn-kubernetes/pull/3054
 		// Review this line when upgrade mechanism will be implemented
 		ovsArgs = append(ovsArgs, fmt.Sprintf("external_ids:vf-netdev-name=%s", ifInfo.NetdevName))
 	}
 
 	if ifInfo.NetName != types.DefaultNetworkName {
 		ovsArgs = append(ovsArgs, fmt.Sprintf("external_ids:%s=%s", types.NetworkExternalID, ifInfo.NetName))
-		ovsArgs = append(ovsArgs, fmt.Sprintf("external_ids:%s=%s", types.NADExternalID, ifInfo.NADName))
+		ovsArgs = append(ovsArgs, fmt.Sprintf("external_ids:%s=%s", types.NADExternalID, ifInfo.NADKey))
 	} else {
 		ovsArgs = append(ovsArgs, []string{"--", "--if-exists", "remove", "interface", hostIfaceName, "external_ids", types.NetworkExternalID}...)
 		ovsArgs = append(ovsArgs, []string{"--", "--if-exists", "remove", "interface", hostIfaceName, "external_ids", types.NADExternalID}...)
@@ -544,12 +653,27 @@ func ConfigureOVS(ctx context.Context, namespace, podName, hostIfaceName string,
 		return err
 	}
 
-	if ifInfo.Ingress > 0 || ifInfo.Egress > 0 {
-		l, err := netlink.LinkByName(hostIfaceName)
-		if err != nil {
-			return fmt.Errorf("failed to find host veth interface %s: %v", hostIfaceName, err)
+	var link netlink.Link
+	if deviceID != "" || (ifInfo.Ingress > 0 || ifInfo.Egress > 0) {
+		if link, err = util.GetNetLinkOps().LinkByName(hostIfaceName); err != nil {
+			return fmt.Errorf("failed to find interface %s: %v", hostIfaceName, err)
 		}
-		err = netlink.LinkSetTxQLen(l, 1000)
+	}
+
+	if deviceID != "" {
+		// 4. set MTU on the representor
+		if err = util.GetNetLinkOps().LinkSetMTU(link, ifInfo.MTU); err != nil {
+			return fmt.Errorf("failed to set MTU on %s: %v", hostIfaceName, err)
+		}
+		// 5. if the interface is not up, set it to up
+		err = util.GetNetLinkOps().LinkSetUp(link)
+		if err != nil {
+			return fmt.Errorf("failed to set link UP on %s: %v", hostIfaceName, err)
+		}
+	}
+
+	if ifInfo.Ingress > 0 || ifInfo.Egress > 0 {
+		err = netlink.LinkSetTxQLen(link, 1000)
 		if err != nil {
 			return fmt.Errorf("failed to set host veth txqlen: %v", err)
 		}
@@ -597,6 +721,7 @@ func (*defaultPodRequestInterfaceOps) ConfigureInterface(pr *PodRequest, getter 
 			return nil, fmt.Errorf("unexpected configuration, pod request on dpu host. " +
 				"device ID must be provided")
 		}
+
 		// General case
 		hostIface, contIface, err = setupInterface(netns, pr.SandboxID, pr.IfName, ifInfo)
 	}
@@ -605,7 +730,7 @@ func (*defaultPodRequestInterfaceOps) ConfigureInterface(pr *PodRequest, getter 
 	}
 
 	if !ifInfo.IsDPUHostMode {
-		err = ConfigureOVS(pr.ctx, pr.PodNamespace, pr.PodName, hostIface.Name, ifInfo, pr.SandboxID, pr.CNIConf.DeviceID, getter)
+		err = ConfigureOVS(pr.ctx, pr.PodNamespace, pr.PodName, pr.IfName, hostIface.Name, ifInfo, pr.SandboxID, pr.CNIConf.DeviceID, getter)
 		if err != nil {
 			pr.deletePort(hostIface.Name, pr.PodNamespace, pr.PodName)
 			return nil, err
@@ -722,7 +847,7 @@ func (*defaultPodRequestInterfaceOps) UnconfigureInterface(pr *PodRequest, ifInf
 			return nil
 		})
 		if err != nil {
-			klog.Errorf(err.Error())
+			klog.Errorf("Error in UnconfigureInterface: %v", err)
 		}
 	}
 
@@ -789,7 +914,7 @@ func (pr *PodRequest) deletePodConntrack() {
 				continue
 			}
 		}
-		err = util.DeleteConntrack(ip.Address.IP.String(), 0, "", netlink.ConntrackReplyAnyIP, nil)
+		_, err = util.DeleteConntrack(ip.Address.IP.String(), 0, "", netlink.ConntrackReplyAnyIP, nil)
 		if err != nil {
 			klog.Errorf("Failed to delete Conntrack Entry for %s: %v", ip.Address.IP.String(), err)
 			continue
@@ -800,13 +925,34 @@ func (pr *PodRequest) deletePodConntrack() {
 func (pr *PodRequest) deletePort(ifaceName, podNamespace, podName string) {
 	podDesc := fmt.Sprintf("%s/%s", podNamespace, podName)
 
+	var isVFDevice bool
+	link, err := util.GetNetLinkOps().LinkByName(ifaceName)
+	if err != nil {
+		klog.Warningf("Failed to find host-side link %s for pod %q: %v", ifaceName, podDesc, err)
+	} else if pr.CNIConf.DeviceID != "" {
+		isVFDevice = true
+	}
+
+	if isVFDevice {
+		// SR-IOV case: bring down the representor before removing from OVS.
+		// The device plugin can re-allocate a VF to a new pod before this
+		// CmdDel completes, causing the new pod's CmdAdd shim to run
+		// concurrently. By doing LinkSetDown before del-port, we eliminate
+		// the window where a racing CmdAdd could have its LinkSetUp or
+		// ConfigureOVS undone.
+		if err = util.GetNetLinkOps().LinkSetDown(link); err != nil {
+			klog.Warningf("Failed to bring down pod %q interface %s: %v", podDesc, ifaceName, err)
+		}
+	}
+
 	out, err := ovsExec("del-port", "br-int", ifaceName)
 	if err != nil && !strings.Contains(err.Error(), "no port named") {
 		// DEL should be idempotent; don't return an error just log it
 		klog.Warningf("Failed to delete pod %q OVS port %s: %v\n  %q", podDesc, ifaceName, err, string(out))
 	}
+
 	// skip deleting representor ports
-	if pr.CNIConf.DeviceID == "" {
+	if link != nil && !isVFDevice {
 		if err = util.LinkDelete(ifaceName); err != nil {
 			klog.Warningf("Failed to delete pod %q interface %s: %v", podDesc, ifaceName, err)
 		}
@@ -817,4 +963,69 @@ func (pr *PodRequest) deletePorts(ifaces []string, podNamespace, podName string)
 	for _, iface := range ifaces {
 		pr.deletePort(iface, podNamespace, podName)
 	}
+}
+
+// setupIngressFilter sets up an ingress filter using nftables to block
+// unwanted ICMPv6 Router Advertisement (RA) packets on a specific device.
+// It creates a new nftables table, chain, and rule to drop RA packets
+// that do not match the specified gateway link-local address (gwLLA) and
+// have a Router Advertisement (RA) lifetime not equal to 0.
+//
+// The nftables rule created by this function looks like:
+// `icmpv6 type nd-router-advert ip6 saddr != <gwLLA> @th,48,16 != 0 drop`
+//
+// Parameters:
+//   - ifaceName: The name of the network interface where the ingress filter
+//     should be applied.
+//   - gwLLA: The gateway link-local address to match against in the RA packets.
+//
+// Returns:
+// - error: An error if the nftables setup fails, otherwise nil.
+func setupIngressFilter(ifaceName, gwLLA string) error {
+	const (
+		tableName   = "ingress_filter" // Name of the nftables table to be created
+		rasLifetime = "@th,48,16"      // Offset for RA lifetime field in ICMPv6 packets
+	)
+
+	// Initialize a new nftables table for the ingress filter
+	nft, err := knftables.New(knftables.NetDevFamily, tableName)
+	if err != nil {
+		return fmt.Errorf("failed to initialize table: %w", err)
+	}
+
+	// Delegate the setup of the filter with the specified table and lifetime matcher
+	return setupIngressFilterWithTableAndLifetimeMatcher(nft, ifaceName, gwLLA, rasLifetime)
+}
+
+func setupIngressFilterWithTableAndLifetimeMatcher(nft knftables.Interface, ifaceName, gwLLA, rasLifetime string) error {
+	const (
+		chainName = "input"
+	)
+
+	tx := nft.NewTransaction()
+
+	tx.Add(&knftables.Table{})
+
+	tx.Add(&knftables.Chain{
+		Name:     chainName,
+		Type:     knftables.PtrTo(knftables.FilterType),
+		Hook:     knftables.PtrTo(knftables.IngressHook),
+		Priority: knftables.PtrTo(knftables.FilterPriority),
+		Device:   knftables.PtrTo(ifaceName),
+	})
+
+	tx.Add(&knftables.Rule{
+		Chain: chainName,
+		Rule: knftables.Concat(
+			"icmpv6", "type", "nd-router-advert", "ip6", "saddr", "!=", gwLLA, rasLifetime, "!=", "0", "drop",
+		),
+	})
+
+	// Execute the transaction
+	if err := nft.Run(context.Background(), tx); err != nil {
+		return fmt.Errorf("could not update netdev nftables: %v", err)
+	}
+
+	return nil
+
 }

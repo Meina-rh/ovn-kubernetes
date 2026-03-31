@@ -1,6 +1,7 @@
 package pod
 
 import (
+	"errors"
 	"fmt"
 	"net"
 
@@ -10,14 +11,18 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/klog/v2"
+	utilnet "k8s.io/utils/net"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/id"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/ip"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/ip/subnet"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/persistentips"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/id"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/ip"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/ip/subnet"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/mac"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/generator/udn"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/kube"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/persistentips"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 // PodAnnotationAllocator is a utility to handle allocation of the PodAnnotation to Pods.
@@ -27,19 +32,33 @@ type PodAnnotationAllocator struct {
 
 	netInfo              util.NetInfo
 	ipamClaimsReconciler persistentips.PersistentAllocations
+	macRegistry          mac.Register
 }
+
+type AllocatorOption func(*PodAnnotationAllocator)
 
 func NewPodAnnotationAllocator(
 	netInfo util.NetInfo,
 	podLister listers.PodLister,
 	kube kube.InterfaceOVN,
 	claimsReconciler persistentips.PersistentAllocations,
+	opts ...AllocatorOption,
 ) *PodAnnotationAllocator {
-	return &PodAnnotationAllocator{
+	p := &PodAnnotationAllocator{
 		podLister:            podLister,
 		kube:                 kube,
 		netInfo:              netInfo,
 		ipamClaimsReconciler: claimsReconciler,
+	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
+}
+
+func WithMACRegistry(m mac.Register) AllocatorOption {
+	return func(p *PodAnnotationAllocator) {
+		p.macRegistry = m
 	}
 }
 
@@ -54,7 +73,9 @@ func NewPodAnnotationAllocator(
 // false.
 func (allocator *PodAnnotationAllocator) AllocatePodAnnotation(
 	ipAllocator subnet.NamedAllocator,
+	node *corev1.Node,
 	pod *corev1.Pod,
+	nadKey string,
 	network *nadapi.NetworkSelectionElement,
 	reallocateIP bool,
 	networkRole string) (
@@ -67,9 +88,12 @@ func (allocator *PodAnnotationAllocator) AllocatePodAnnotation(
 		allocator.kube,
 		ipAllocator,
 		allocator.netInfo,
+		node,
 		pod,
+		nadKey,
 		network,
 		allocator.ipamClaimsReconciler,
+		allocator.macRegistry,
 		reallocateIP,
 		networkRole,
 	)
@@ -80,9 +104,12 @@ func allocatePodAnnotation(
 	kube kube.Interface,
 	ipAllocator subnet.NamedAllocator,
 	netInfo util.NetInfo,
+	node *corev1.Node,
 	pod *corev1.Pod,
+	nadKey string,
 	network *nadapi.NetworkSelectionElement,
 	claimsReconciler persistentips.PersistentAllocations,
+	macRegistry mac.Register,
 	reallocateIP bool,
 	networkRole string) (
 	updatedPod *corev1.Pod,
@@ -98,9 +125,12 @@ func allocatePodAnnotation(
 			ipAllocator,
 			idAllocator,
 			netInfo,
+			node,
 			pod,
+			nadKey,
 			network,
 			claimsReconciler,
+			macRegistry,
 			reallocateIP,
 			networkRole,
 		)
@@ -133,7 +163,9 @@ func allocatePodAnnotation(
 func (allocator *PodAnnotationAllocator) AllocatePodAnnotationWithTunnelID(
 	ipAllocator subnet.NamedAllocator,
 	idAllocator id.NamedAllocator,
+	node *corev1.Node,
 	pod *corev1.Pod,
+	nadKey string,
 	network *nadapi.NetworkSelectionElement,
 	reallocateIP bool,
 	networkRole string) (
@@ -147,9 +179,12 @@ func (allocator *PodAnnotationAllocator) AllocatePodAnnotationWithTunnelID(
 		ipAllocator,
 		idAllocator,
 		allocator.netInfo,
+		node,
 		pod,
+		nadKey,
 		network,
 		allocator.ipamClaimsReconciler,
+		allocator.macRegistry,
 		reallocateIP,
 		networkRole,
 	)
@@ -161,9 +196,12 @@ func allocatePodAnnotationWithTunnelID(
 	ipAllocator subnet.NamedAllocator,
 	idAllocator id.NamedAllocator,
 	netInfo util.NetInfo,
+	node *corev1.Node,
 	pod *corev1.Pod,
+	nadKey string,
 	network *nadapi.NetworkSelectionElement,
 	claimsReconciler persistentips.PersistentAllocations,
+	macRegistry mac.Register,
 	reallocateIP bool,
 	networkRole string) (
 	updatedPod *corev1.Pod,
@@ -176,9 +214,12 @@ func allocatePodAnnotationWithTunnelID(
 			ipAllocator,
 			idAllocator,
 			netInfo,
+			node,
 			pod,
+			nadKey,
 			network,
 			claimsReconciler,
+			macRegistry,
 			reallocateIP,
 			networkRole,
 		)
@@ -197,6 +238,80 @@ func allocatePodAnnotationWithTunnelID(
 	}
 
 	return pod, podAnnotation, nil
+}
+
+// validateStaticIPRequest checks if a static IP request can be honored when IPAM is enabled for the given network.
+func validateStaticIPRequest(netInfo util.NetInfo, network *nadapi.NetworkSelectionElement, ipamClaim *ipamclaimsapi.IPAMClaim, podDesc string) error {
+	// Allow static IPs with IPAM only for primary networks with layer2 topology when EnablePreconfiguredUDNAddresses is enabled
+	// Feature gate integration: EnablePreconfiguredUDNAddresses controls static IP allocation with IPAM
+	if !util.IsPreconfiguredUDNAddressesEnabled() {
+		// Feature is disabled, reject static IPs with IPAM
+		return fmt.Errorf("cannot allocate a static IP request with IPAM for pod %s (custom network configuration disabled)", podDesc)
+	}
+	if !netInfo.IsPrimaryNetwork() {
+		// Static IP requests with IPAM are only supported on primary networks
+		return fmt.Errorf("cannot allocate a static IP request with IPAM for pod %s: only supported on primary networks", podDesc)
+	}
+	if netInfo.TopologyType() != types.Layer2Topology {
+		// Static IP requests with IPAM are only supported on layer2 topology networks.
+		// On other topologies, we cannot distinguish between already allocated IPs and
+		// IPs excluded from allocation, making it impossible to safely honor static IP
+		// requests when IPAM is enabled.
+		return fmt.Errorf("cannot allocate a static IP request with IPAM for pod %s: layer2 topology is required, but network has topology %q", podDesc, netInfo.TopologyType())
+	}
+	if ipamClaim != nil && len(ipamClaim.Status.IPs) > 0 {
+		for _, ipRequest := range network.IPRequest {
+			if !util.IsItemInSlice(ipamClaim.Status.IPs, ipRequest) {
+				return fmt.Errorf("cannot allocate a static IP request with IPAM for pod %q: the pod references an ipam claim with IPs not containing the requested IP %q", podDesc, ipRequest)
+			}
+		}
+	}
+
+	if err := validateIPFamilyMatchesNetwork(netInfo, network.IPRequest); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+var (
+	ErrIPFamilyMismatch = errors.New("requested IPs family types must match network's IP family configuration")
+)
+
+func validateIPFamilyMatchesNetwork(netInfo util.NetInfo, ipRequests []string) error {
+	if len(ipRequests) == 0 {
+		return nil
+	}
+
+	if len(ipRequests) > 2 {
+		return fmt.Errorf("layer2 network expects at most 2 IPs, got %d: %w", len(ipRequests), ErrIPFamilyMismatch)
+	}
+
+	if len(ipRequests) != len(netInfo.Subnets()) {
+		return fmt.Errorf("layer2 network expects %d IP(s), got %d: %w", len(netInfo.Subnets()), len(ipRequests), ErrIPFamilyMismatch)
+	}
+
+	requestedIPs, err := util.ParseIPNets(ipRequests)
+	if err != nil {
+		return fmt.Errorf("failed to parse IP requests: %w", err)
+	}
+
+	var requestedIPv4, requestedIPv6 bool
+	for _, ipNet := range requestedIPs {
+		if utilnet.IsIPv6CIDR(ipNet) {
+			requestedIPv6 = true
+		} else {
+			requestedIPv4 = true
+		}
+	}
+
+	ipv4Mode, ipv6Mode := netInfo.IPMode()
+	if ipv4Mode != requestedIPv4 || ipv6Mode != requestedIPv6 {
+		return fmt.Errorf("layer2 network IP family mismatch: network supports IPv4=%t IPv6=%t, but requested types IPv4=%t IPv6=%t: %w",
+			ipv4Mode, ipv6Mode, requestedIPv4, requestedIPv6, ErrIPFamilyMismatch)
+	}
+
+	return nil
 }
 
 // allocatePodAnnotationWithRollback allocates the PodAnnotation which includes
@@ -220,9 +335,12 @@ func allocatePodAnnotationWithRollback(
 	ipAllocator subnet.NamedAllocator,
 	idAllocator id.NamedAllocator,
 	netInfo util.NetInfo,
+	node *corev1.Node,
 	pod *corev1.Pod,
+	nadKey string,
 	network *nadapi.NetworkSelectionElement,
 	claimsReconciler persistentips.PersistentAllocations,
+	macRegistry mac.Register,
 	reallocateIP bool,
 	networkRole string) (
 	updatedPod *corev1.Pod,
@@ -230,11 +348,12 @@ func allocatePodAnnotationWithRollback(
 	rollback func(),
 	err error) {
 
-	nadName := types.DefaultNetworkName
-	if netInfo.IsSecondary() {
-		nadName = util.GetNADName(network.Namespace, network.Name)
+	if !netInfo.IsUserDefinedNetwork() {
+		nadKey = types.DefaultNetworkName
 	}
-	podDesc := fmt.Sprintf("%s/%s/%s", nadName, pod.Namespace, pod.Name)
+	podDesc := fmt.Sprintf("%s/%s/%s", nadKey, pod.Namespace, pod.Name)
+	macOwnerID := macOwner(pod)
+	networkName := netInfo.GetNetworkName()
 
 	// the IPs we allocate in this function need to be released back to the IPAM
 	// pool if there is some error in any step past the point the IPs were
@@ -242,12 +361,23 @@ func allocatePodAnnotationWithRollback(
 	// for defer to work correctly.
 	var releaseIPs []*net.IPNet
 	var releaseID int
+	var releaseMAC net.HardwareAddr
 	rollback = func() {
 		if releaseID != 0 {
 			idAllocator.ReleaseID()
 			klog.V(5).Infof("Released ID %d", releaseID)
 			releaseID = 0
 		}
+
+		if len(releaseMAC) > 0 && macRegistry != nil {
+			if rerr := macRegistry.Release(macOwnerID, releaseMAC); rerr != nil {
+				klog.Errorf("Failed to release MAC %q on rollback, owner: %q, network: %q: %v", releaseMAC.String(), macOwnerID, networkName, rerr)
+			} else {
+				klog.V(5).Infof("Released MAC %q on rollback, owner: %q, network: %q", releaseMAC.String(), macOwnerID, networkName)
+			}
+			releaseMAC = nil
+		}
+
 		if len(releaseIPs) == 0 {
 			return
 		}
@@ -266,7 +396,8 @@ func allocatePodAnnotationWithRollback(
 		}
 	}()
 
-	podAnnotation, _ = util.UnmarshalPodAnnotation(pod.Annotations, nadName)
+	podAnnotation, _ = util.UnmarshalPodAnnotation(pod.Annotations, nadKey)
+	isNetworkAllocated := podAnnotation != nil
 	if podAnnotation == nil {
 		podAnnotation = &util.PodAnnotation{}
 	}
@@ -321,13 +452,21 @@ func allocatePodAnnotationWithRollback(
 		}
 		hasIPAMClaim = ipamClaim != nil && len(ipamClaim.Status.IPs) > 0
 	}
+
+	defer func() {
+		if ipamClaim == nil || claimsReconciler == nil {
+			return
+		}
+		updatedClaim := claimsReconciler.UpdateIPAMClaimStatus(ipamClaim, podAnnotation, pod.Name, err)
+		if reconcileErr := claimsReconciler.Reconcile(ipamClaim, updatedClaim, ipAllocator); reconcileErr != nil {
+			err = errors.Join(err, fmt.Errorf("failed to reconcile IPAM claim %s/%s: %w", ipamClaim.Namespace, ipamClaim.Name, reconcileErr))
+		}
+	}()
+
 	if hasIPAM && hasStaticIPRequest {
-		// for now we can't tell apart already allocated IPs from IPs excluded
-		// from allocation so we can't really honor static IP requests when
-		// there is IPAM as we don't really know if the requested IP should not
-		// be allocated or was already allocated by the same pod
-		err = fmt.Errorf("cannot allocate a static IP request with IPAM for pod %s", podDesc)
-		return
+		if err = validateStaticIPRequest(netInfo, network, ipamClaim, podDesc); err != nil {
+			return
+		}
 	}
 
 	// we need to update the annotation if it is missing IPs or MAC
@@ -339,6 +478,7 @@ func allocatePodAnnotationWithRollback(
 		if hasIPRequest {
 			tentative.IPs, err = util.ParseIPNets(network.IPRequest)
 			if err != nil {
+				klog.Warningf("Failed parsing IPRequest %+v for pod %s: %v", network.IPRequest, podDesc, err)
 				return
 			}
 		} else if hasIPAMClaim {
@@ -351,7 +491,7 @@ func allocatePodAnnotationWithRollback(
 
 	if hasIPAM {
 		if len(tentative.IPs) > 0 {
-			if err = ipAllocator.AllocateIPs(tentative.IPs); err != nil && !ip.IsErrAllocated(err) {
+			if err = ipAllocator.AllocateIPs(tentative.IPs); err != nil && !shouldSkipAllocateIPsError(err, isNetworkAllocated, ipamClaim) {
 				err = fmt.Errorf("failed to ensure requested or annotated IPs %v for %s: %w",
 					util.StringSlice(tentative.IPs), podDesc, err)
 				if !reallocateOnNonStaticIPRequest {
@@ -362,7 +502,7 @@ func allocatePodAnnotationWithRollback(
 				tentative.IPs = nil
 			}
 
-			if err == nil && !hasIPAMClaim { // if we have persistentIPs, we should *not* release them on rollback
+			if err == nil && (!hasIPAMClaim || !isNetworkAllocated) {
 				// copy the IPs that would need to be released
 				releaseIPs = util.CopyIPNets(tentative.IPs)
 			}
@@ -395,9 +535,24 @@ func allocatePodAnnotationWithRollback(
 		if err != nil {
 			return
 		}
+		if macRegistry != nil {
+			if rerr := macRegistry.Reserve(macOwnerID, tentative.MAC); rerr != nil {
+				// repeated requests are no-op because mac already reserved
+				if !errors.Is(rerr, mac.ErrMACReserved) {
+					// avoid leaking the network name because this error may reflect of a pod event, which is visible to non-admins.
+					err = fmt.Errorf("failed to reserve MAC address %q for owner %q on NAD key %q: %w",
+						tentative.MAC, macOwnerID, nadKey, rerr)
+					klog.Errorf("%v, network-name: %q", err, networkName)
+					return
+				}
+			} else {
+				klog.V(5).Infof("Reserved MAC %q for owner %q on network %q NAD key %q", tentative.MAC, macOwnerID, networkName, nadKey)
+				releaseMAC = tentative.MAC
+			}
+		}
 
 		// handle routes & gateways
-		err = util.AddRoutesGatewayIP(netInfo, pod, tentative, network)
+		err = AddRoutesGatewayIP(netInfo, node, pod, tentative, network)
 		if err != nil {
 			return
 		}
@@ -407,15 +562,237 @@ func allocatePodAnnotationWithRollback(
 
 	if needsAnnotationUpdate {
 		updatedPod = pod
-		updatedPod.Annotations, err = util.MarshalPodAnnotation(updatedPod.Annotations, tentative, nadName)
+		updatedPod.Annotations, err = util.MarshalPodAnnotation(updatedPod.Annotations, tentative, nadKey)
 		podAnnotation = tentative
 	}
 
-	if ipamClaim != nil && err == nil {
-		newIPAMClaim := ipamClaim.DeepCopy()
-		newIPAMClaim.Status.IPs = util.StringSlice(podAnnotation.IPs)
-		err = claimsReconciler.Reconcile(ipamClaim, newIPAMClaim, ipAllocator)
+	return
+}
+
+func joinSubnetToRoute(netinfo util.NetInfo, isIPv6 bool, gatewayIP net.IP) util.PodRoute {
+	joinSubnet := netinfo.JoinSubnetV4()
+	if isIPv6 {
+		joinSubnet = netinfo.JoinSubnetV6()
+	}
+	return util.PodRoute{
+		Dest:    joinSubnet,
+		NextHop: gatewayIP,
+	}
+}
+
+func serviceCIDRToRoute(isIPv6 bool, gatewayIP net.IP) []util.PodRoute {
+	var podRoutes []util.PodRoute
+	for _, serviceSubnet := range config.Kubernetes.ServiceCIDRs {
+		if isIPv6 == utilnet.IsIPv6CIDR(serviceSubnet) {
+			podRoutes = append(podRoutes, util.PodRoute{
+				Dest:    serviceSubnet,
+				NextHop: gatewayIP,
+			})
+		}
+	}
+	return podRoutes
+}
+
+func hairpinMasqueradeIPToRoute(isIPv6 bool, gatewayIP net.IP) util.PodRoute {
+	ip := config.Gateway.MasqueradeIPs.V4OVNServiceHairpinMasqueradeIP
+	if isIPv6 {
+		ip = config.Gateway.MasqueradeIPs.V6OVNServiceHairpinMasqueradeIP
+	}
+	return util.PodRoute{
+		Dest: &net.IPNet{
+			IP:   ip,
+			Mask: util.GetIPFullMask(ip),
+		},
+		NextHop: gatewayIP,
+	}
+}
+
+// addRoutesGatewayIP updates the provided pod annotation for the provided pod
+// with the gateways derived from the allocated IPs
+func AddRoutesGatewayIP(
+	netinfo util.NetInfo,
+	node *corev1.Node,
+	pod *corev1.Pod,
+	podAnnotation *util.PodAnnotation,
+	network *nadapi.NetworkSelectionElement) error {
+
+	// generate the nodeSubnets from the allocated IPs
+	nodeSubnets := util.IPsToNetworkIPs(podAnnotation.IPs...)
+
+	if netinfo.IsUserDefinedNetwork() {
+		// for secondary network, see if its network-attachment's annotation has default-route key.
+		// If present, then we need to add default route for it
+		podAnnotation.Gateways = append(podAnnotation.Gateways, network.GatewayRequest...)
+		topoType := netinfo.TopologyType()
+		switch topoType {
+		case types.LocalnetTopology:
+			// no route needed for directly connected subnets
+			return nil
+		case types.Layer2Topology:
+			if !util.IsNetworkSegmentationSupportEnabled() || !netinfo.IsPrimaryNetwork() {
+				return nil
+			}
+			// logical router port MAC is based on IPv4 subnet if there is one, else IPv6
+			// hasV4 is used to ensure that if ipv4 address was found, it is not overridden by an ipv6 address
+			var nodeLRPMAC net.HardwareAddr
+			var hasV4 bool
+			for _, podIfAddr := range podAnnotation.IPs {
+				isIPv6 := utilnet.IsIPv6CIDR(podIfAddr)
+				nodeSubnet, err := util.MatchFirstIPNetFamily(isIPv6, nodeSubnets)
+				if err != nil {
+					return err
+				}
+				gatewayIPnet := netinfo.GetNodeGatewayIP(nodeSubnet)
+				// Ensure default service network traffic always goes to OVN
+				podAnnotation.Routes = append(podAnnotation.Routes, serviceCIDRToRoute(isIPv6, gatewayIPnet.IP)...)
+				// Ensure UDN join subnet traffic always goes to UDN LSP
+				podAnnotation.Routes = append(podAnnotation.Routes, joinSubnetToRoute(netinfo, isIPv6, gatewayIPnet.IP))
+				if network != nil && len(network.GatewayRequest) == 0 { // if specific default route for pod was not requested then add gatewayIP
+					podAnnotation.Gateways = append(podAnnotation.Gateways, gatewayIPnet.IP)
+				}
+				if !isIPv6 {
+					hasV4 = true
+					nodeLRPMAC = util.IPAddrToHWAddr(gatewayIPnet.IP)
+				} else if !hasV4 {
+					// only use IPv6 address to derive MAC if IPv4 address hasn't been found yet
+					nodeLRPMAC = util.IPAddrToHWAddr(gatewayIPnet.IP)
+				}
+			}
+			// Until https://github.com/ovn-kubernetes/ovn-kubernetes/issues/4876 is fixed, it is limited to IC only
+			if config.OVNKubernetesFeature.EnableInterconnect {
+				if _, isIPv6Mode := netinfo.IPMode(); isIPv6Mode {
+					var routerPortMac net.HardwareAddr
+					if !util.UDNLayer2NodeUsesTransitRouter(node) {
+						joinAddrs, err := udn.GetGWRouterIPs(node, netinfo.GetNetInfo())
+						if err != nil {
+							if util.IsAnnotationNotSetError(err) {
+								return types.NewSuppressedError(err)
+							}
+							return fmt.Errorf("failed parsing node gateway router join addresses, network %q, %w", netinfo.GetNetworkName(), err)
+						}
+						routerPortMac = util.IPAddrToHWAddr(joinAddrs[0].IP)
+					} else {
+						routerPortMac = nodeLRPMAC
+					}
+					podAnnotation.GatewayIPv6LLA = util.HWAddrToIPv6LLA(routerPortMac)
+				}
+			}
+			return nil
+		case types.Layer3Topology:
+			for _, podIfAddr := range podAnnotation.IPs {
+				isIPv6 := utilnet.IsIPv6CIDR(podIfAddr)
+				nodeSubnet, err := util.MatchFirstIPNetFamily(isIPv6, nodeSubnets)
+				if err != nil {
+					return err
+				}
+				gatewayIPnet := netinfo.GetNodeGatewayIP(nodeSubnet)
+				for _, clusterSubnet := range netinfo.Subnets() {
+					if isIPv6 == utilnet.IsIPv6CIDR(clusterSubnet.CIDR) {
+						podAnnotation.Routes = append(podAnnotation.Routes, util.PodRoute{
+							Dest:    clusterSubnet.CIDR,
+							NextHop: gatewayIPnet.IP,
+						})
+					}
+				}
+				if !util.IsNetworkSegmentationSupportEnabled() || !netinfo.IsPrimaryNetwork() {
+					continue
+				}
+				// Ensure default service network traffic always goes to OVN
+				podAnnotation.Routes = append(podAnnotation.Routes, serviceCIDRToRoute(isIPv6, gatewayIPnet.IP)...)
+				// Ensure UDN join subnet traffic always goes to UDN LSP
+				podAnnotation.Routes = append(podAnnotation.Routes, joinSubnetToRoute(netinfo, isIPv6, gatewayIPnet.IP))
+				if network != nil && len(network.GatewayRequest) == 0 { // if specific default route for pod was not requested then add gatewayIP
+					podAnnotation.Gateways = append(podAnnotation.Gateways, gatewayIPnet.IP)
+				}
+			}
+			return nil
+		}
+		return fmt.Errorf("topology type %s not supported", topoType)
 	}
 
-	return
+	// if there are other network attachments for the pod, then check if those network-attachment's
+	// annotation has default-route key. If present, then we need to skip adding default route for
+	// OVN interface
+	networks, err := util.GetK8sPodAllNetworkSelections(pod)
+	if err != nil {
+		return fmt.Errorf("error while getting network attachment definition for [%s/%s]: %v",
+			pod.Namespace, pod.Name, err)
+	}
+	otherDefaultRouteV4 := false
+	otherDefaultRouteV6 := false
+	for _, network := range networks {
+		for _, gatewayRequest := range network.GatewayRequest {
+			if utilnet.IsIPv6(gatewayRequest) {
+				otherDefaultRouteV6 = true
+			} else {
+				otherDefaultRouteV4 = true
+			}
+		}
+	}
+
+	for _, podIfAddr := range podAnnotation.IPs {
+		isIPv6 := utilnet.IsIPv6CIDR(podIfAddr)
+		nodeSubnet, err := util.MatchFirstIPNetFamily(isIPv6, nodeSubnets)
+		if err != nil {
+			return err
+		}
+
+		gatewayIPnet := netinfo.GetNodeGatewayIP(nodeSubnet)
+
+		// Ensure default pod network traffic always goes to OVN
+		for _, clusterSubnet := range config.Default.ClusterSubnets {
+			if isIPv6 == utilnet.IsIPv6CIDR(clusterSubnet.CIDR) {
+				podAnnotation.Routes = append(podAnnotation.Routes, util.PodRoute{
+					Dest:    clusterSubnet.CIDR,
+					NextHop: gatewayIPnet.IP,
+				})
+			}
+		}
+
+		if podAnnotation.Role == types.NetworkRolePrimary {
+			// Ensure default service network traffic always goes to OVN
+			podAnnotation.Routes = append(podAnnotation.Routes, serviceCIDRToRoute(isIPv6, gatewayIPnet.IP)...)
+			// Ensure service hairpin masquerade traffic always goes to OVN
+			podAnnotation.Routes = append(podAnnotation.Routes, hairpinMasqueradeIPToRoute(isIPv6, gatewayIPnet.IP))
+			otherDefaultRoute := otherDefaultRouteV4
+			if isIPv6 {
+				otherDefaultRoute = otherDefaultRouteV6
+			}
+			if !otherDefaultRoute {
+				podAnnotation.Gateways = append(podAnnotation.Gateways, gatewayIPnet.IP)
+			}
+		}
+
+		// Ensure default join subnet traffic always goes to OVN
+		podAnnotation.Routes = append(podAnnotation.Routes, joinSubnetToRoute(netinfo, isIPv6, gatewayIPnet.IP))
+	}
+
+	return nil
+}
+
+// shouldSkipAllocateIPsError determines whether to skip/ignore IP allocation errors
+// in scenarios where IPs may already be legitimately allocated.
+// Returns false if the error is not ErrAllocated or if none of the skip conditions are met. True otherwise.
+func shouldSkipAllocateIPsError(err error, networkAllocated bool, ipamClaim *ipamclaimsapi.IPAMClaim) bool {
+	// Only skip if it's an "already allocated" error
+	if !ip.IsErrAllocated(err) {
+		return false
+	}
+
+	// If PreconfiguredUDNAddressesEnabled is disabled, always skip ErrAllocated
+	if !util.IsPreconfiguredUDNAddressesEnabled() {
+		return true
+	}
+
+	// Always skip ErrAllocated if network annotation already persisted on pod
+	if networkAllocated {
+		return true
+	}
+
+	// For persistent IP VM/Pods, if IPAMClaim already has IPs allocated, then ip already allocated, skip ErrAllocated
+	if ipamClaim != nil && len(ipamClaim.Status.IPs) > 0 {
+		return true
+	}
+
+	return false
 }

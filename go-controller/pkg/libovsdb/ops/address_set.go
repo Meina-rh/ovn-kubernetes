@@ -3,11 +3,11 @@ package ops
 import (
 	"context"
 
-	libovsdbclient "github.com/ovn-org/libovsdb/client"
-	"github.com/ovn-org/libovsdb/ovsdb"
+	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
+	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
 )
 
 type addressSetPredicate func(*nbdb.AddressSet) bool
@@ -18,7 +18,7 @@ type addressSetPredicate func(*nbdb.AddressSet) bool
 // The purpose is to prevent libovsdb interpreting non-nil empty maps/slices
 // as default and thus being filtered out of the update. The intention is to
 // use non-nil empty maps/slices to clear them out in the update.
-// See: https://github.com/ovn-org/libovsdb/issues/226
+// See: https://github.com/ovn-kubernetes/libovsdb/issues/226
 func getNonZeroAddressSetMutableFields(as *nbdb.AddressSet) []interface{} {
 	fields := []interface{}{}
 	if as.Addresses != nil {

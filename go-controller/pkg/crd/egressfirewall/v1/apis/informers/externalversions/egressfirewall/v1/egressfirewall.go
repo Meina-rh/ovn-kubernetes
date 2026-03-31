@@ -18,13 +18,13 @@ limitations under the License.
 package v1
 
 import (
-	"context"
+	context "context"
 	time "time"
 
-	egressfirewallv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1"
-	versioned "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/clientset/versioned"
-	internalinterfaces "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/informers/externalversions/internalinterfaces"
-	v1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/listers/egressfirewall/v1"
+	crdegressfirewallv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1"
+	versioned "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/clientset/versioned"
+	internalinterfaces "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/informers/externalversions/internalinterfaces"
+	egressfirewallv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/listers/egressfirewall/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	watch "k8s.io/apimachinery/pkg/watch"
@@ -35,7 +35,7 @@ import (
 // EgressFirewalls.
 type EgressFirewallInformer interface {
 	Informer() cache.SharedIndexInformer
-	Lister() v1.EgressFirewallLister
+	Lister() egressfirewallv1.EgressFirewallLister
 }
 
 type egressFirewallInformer struct {
@@ -56,21 +56,33 @@ func NewEgressFirewallInformer(client versioned.Interface, namespace string, res
 // one. This reduces memory footprint and number of connections to the server.
 func NewFilteredEgressFirewallInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) cache.SharedIndexInformer {
 	return cache.NewSharedIndexInformer(
-		&cache.ListWatch{
+		cache.ToListWatcherWithWatchListSemantics(&cache.ListWatch{
 			ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.K8sV1().EgressFirewalls(namespace).List(context.TODO(), options)
+				return client.K8sV1().EgressFirewalls(namespace).List(context.Background(), options)
 			},
 			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.K8sV1().EgressFirewalls(namespace).Watch(context.TODO(), options)
+				return client.K8sV1().EgressFirewalls(namespace).Watch(context.Background(), options)
 			},
-		},
-		&egressfirewallv1.EgressFirewall{},
+			ListWithContextFunc: func(ctx context.Context, options metav1.ListOptions) (runtime.Object, error) {
+				if tweakListOptions != nil {
+					tweakListOptions(&options)
+				}
+				return client.K8sV1().EgressFirewalls(namespace).List(ctx, options)
+			},
+			WatchFuncWithContext: func(ctx context.Context, options metav1.ListOptions) (watch.Interface, error) {
+				if tweakListOptions != nil {
+					tweakListOptions(&options)
+				}
+				return client.K8sV1().EgressFirewalls(namespace).Watch(ctx, options)
+			},
+		}, client),
+		&crdegressfirewallv1.EgressFirewall{},
 		resyncPeriod,
 		indexers,
 	)
@@ -81,9 +93,9 @@ func (f *egressFirewallInformer) defaultInformer(client versioned.Interface, res
 }
 
 func (f *egressFirewallInformer) Informer() cache.SharedIndexInformer {
-	return f.factory.InformerFor(&egressfirewallv1.EgressFirewall{}, f.defaultInformer)
+	return f.factory.InformerFor(&crdegressfirewallv1.EgressFirewall{}, f.defaultInformer)
 }
 
-func (f *egressFirewallInformer) Lister() v1.EgressFirewallLister {
-	return v1.NewEgressFirewallLister(f.Informer().GetIndexer())
+func (f *egressFirewallInformer) Lister() egressfirewallv1.EgressFirewallLister {
+	return egressfirewallv1.NewEgressFirewallLister(f.Informer().GetIndexer())
 }

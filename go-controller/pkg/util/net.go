@@ -5,11 +5,14 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"math/big"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 
 	iputils "github.com/containernetworking/plugins/pkg/ip"
+	"github.com/vishvananda/netlink"
 
 	utilnet "k8s.io/utils/net"
 )
@@ -284,6 +287,17 @@ func ContainsCIDR(ipnet1, ipnet2 *net.IPNet) bool {
 	return mask1 <= mask2 && ipnet1.Contains(ipnet2.IP)
 }
 
+// IPNetOverlaps returns ipnets that overlap with the ref
+func IPNetOverlaps(ref *net.IPNet, ipnets ...*net.IPNet) []*net.IPNet {
+	var overlaps []*net.IPNet
+	for _, ipnet := range ipnets {
+		if ref.Contains(ipnet.IP) || ipnet.Contains(ref.IP) {
+			overlaps = append(overlaps, ipnet)
+		}
+	}
+	return overlaps
+}
+
 // ParseIPNets parses the provided string formatted CIDRs
 func ParseIPNets(strs []string) ([]*net.IPNet, error) {
 	ipnets := make([]*net.IPNet, len(strs))
@@ -316,10 +330,52 @@ func GenerateRandMAC() (net.HardwareAddr, error) {
 func CopyIPNets(ipnets []*net.IPNet) []*net.IPNet {
 	copy := make([]*net.IPNet, len(ipnets))
 	for i := range ipnets {
-		ipnet := *ipnets[i]
-		copy[i] = &ipnet
+		if ipnets[i] == nil {
+			continue
+		}
+		copy[i] = &net.IPNet{
+			IP:   slices.Clone(ipnets[i].IP),
+			Mask: slices.Clone(ipnets[i].Mask),
+		}
 	}
 	return copy
+}
+
+func isIPNetEqual(ipn1, ipn2 *net.IPNet) bool {
+	if ipn1 == ipn2 {
+		return true
+	}
+	if ipn1 == nil || ipn2 == nil {
+		return false
+	}
+	m1, _ := ipn1.Mask.Size()
+	m2, _ := ipn2.Mask.Size()
+	return m1 == m2 && ipn1.IP.Equal(ipn2.IP)
+}
+
+// IsIPNetsEqual returns true if both IPNet slices are equal in length and values, regardless of order.
+func IsIPNetsEqual(ipn1, ipn2 []*net.IPNet) bool {
+	if len(ipn1) != len(ipn2) {
+		return false
+	}
+	used := make([]bool, len(ipn2))
+	for i := range ipn1 {
+		found := false
+		for j := range ipn2 {
+			if used[j] {
+				continue
+			}
+			if isIPNetEqual(ipn1[i], ipn2[j]) {
+				used[j] = true
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 // IPsToNetworkIPs returns the network CIDRs of the provided IP CIDRs
@@ -342,8 +398,122 @@ func IPNetsIPToStringSlice(ips []*net.IPNet) []string {
 	return ipAddrs
 }
 
+func IPNetsToStringSlice(ipNets []*net.IPNet) []string {
+	ipNetStrings := make([]string, 0, len(ipNets))
+	for _, ipNet := range ipNets {
+		ipNetStrings = append(ipNetStrings, ipNet.String())
+	}
+	return ipNetStrings
+}
+
+func IPNetsToIPs(ipNets []*net.IPNet) []net.IP {
+	ips := make([]net.IP, 0, len(ipNets))
+	for _, ipNet := range ipNets {
+		ips = append(ips, ipNet.IP)
+	}
+	return ips
+}
+
 // CalculateRouteTableID will calculate route table ID based on the network
 // interface index
 func CalculateRouteTableID(ifIndex int) int {
 	return ifIndex + RoutingTableIDStart
+}
+
+// RouteEqual compare two routes
+func RouteEqual(l, r *netlink.Route) bool {
+	if (l == nil) != (r == nil) {
+		return false
+	}
+	if l == r {
+		return true
+	}
+	if !l.Equal(*r) {
+		return false
+	}
+	return l.Family == r.Family &&
+		l.MTU == r.MTU &&
+		l.Window == r.Window &&
+		l.Rtt == r.Rtt &&
+		l.RttVar == r.RttVar &&
+		l.Ssthresh == r.Ssthresh &&
+		l.Cwnd == r.Cwnd &&
+		l.AdvMSS == r.AdvMSS &&
+		l.Reordering == r.Reordering &&
+		l.Hoplimit == r.Hoplimit &&
+		l.InitCwnd == r.InitCwnd &&
+		l.Features == r.Features &&
+		l.RtoMin == r.RtoMin &&
+		l.InitRwnd == r.InitRwnd &&
+		l.QuickACK == r.QuickACK &&
+		l.Congctl == r.Congctl &&
+		l.FastOpenNoCookie == r.FastOpenNoCookie
+}
+
+// SubnetBroadcastIP returns the IP network's broadcast IP.
+func SubnetBroadcastIP(ipnet net.IPNet) net.IP {
+	ip := ipnet.IP
+	mask := ipnet.Mask
+
+	// Handle IPv4 addresses in 16-byte representation
+	if ip4 := ip.To4(); ip4 != nil {
+		ip = ip4
+	}
+
+	result := make(net.IP, len(ip))
+
+	// broadcastIP = (networkIP) | (inverted mask)
+	for i := range ip {
+		result[i] = (ip[i] & mask[i]) | (mask[i] ^ 0xff)
+	}
+	return result
+}
+
+// ParseIPList parses a comma-separated string of IP addresses ignoring spaces.
+// Returns an empty slice if the input string is empty.
+func ParseIPList(ipsStr string) ([]net.IP, error) {
+	if strings.TrimSpace(ipsStr) == "" {
+		return nil, nil
+	}
+
+	var ips []net.IP
+	ipStrings := strings.Split(ipsStr, ",")
+	for _, ipStr := range ipStrings {
+		ipStr = strings.TrimSpace(ipStr)
+		if ipStr == "" {
+			continue
+		}
+		ip := net.ParseIP(ipStr)
+		if ip == nil {
+			return nil, fmt.Errorf("invalid IP address %q", ipStr)
+		}
+		ips = append(ips, ip)
+	}
+	return ips, nil
+}
+
+// GetLastIPOfSubnet returns the `indexFromLast`th IP address of a given subnet.
+// For example, if indexFromLast is 0 and subnet is 10.0.0.0/24, it returns
+// 10.0.0.255/24.
+func GetLastIPOfSubnet(subnet *net.IPNet, indexFromLast int) *net.IPNet {
+	mask, total := subnet.Mask.Size()
+	base := big.NewInt(1)
+	totalIPs := new(big.Int).Lsh(base, uint(total-mask))
+	lastIPIndex := totalIPs.Sub(totalIPs, big.NewInt(int64(indexFromLast+1)))
+	// this is copied from utilnet.AddIPOffset but to allow big.Int offset
+	r := big.NewInt(0).Add(utilnet.BigForIP(subnet.IP), lastIPIndex).Bytes()
+	r = append(make([]byte, 16), r...)
+	lastIP := net.IP(r[len(r)-16:])
+	return &net.IPNet{IP: lastIP, Mask: subnet.Mask}
+}
+
+func NetworksOverlap(n1, n2 []*net.IPNet) bool {
+	for _, s1 := range n1 {
+		for _, s2 := range n2 {
+			if s1.Contains(s2.IP) || s2.Contains(s1.IP) {
+				return true
+			}
+		}
+	}
+	return false
 }

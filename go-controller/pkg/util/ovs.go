@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
@@ -15,8 +18,8 @@ import (
 	"k8s.io/klog/v2"
 	kexec "k8s.io/utils/exec"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
 )
 
 const (
@@ -47,29 +50,34 @@ const (
 const (
 	nbdbCtlFileName = "ovnnb_db.ctl"
 	sbdbCtlFileName = "ovnsb_db.ctl"
-	OvnNbdbLocation = "/etc/ovn/ovnnb_db.db"
-	OvnSbdbLocation = "/etc/ovn/ovnsb_db.db"
 	FloodAction     = "FLOOD"
 	NormalAction    = "NORMAL"
 )
 
 var (
 	// These are variables (not constants) so that testcases can modify them
-	ovsRunDir string = "/var/run/openvswitch/"
-	ovnRunDir string = "/var/run/ovn/"
-
-	savedOVSRunDir = ovsRunDir
-	savedOVNRunDir = ovnRunDir
+	ovsRunDir string = config.OvsPaths.RunDir
+	ovnRunDir string = config.OvnSouth.RunDir
 )
 
+var ovnCmdRetryInterval = 2 * time.Second
 var ovnCmdRetryCount = 200
 var AppFs = afero.NewOsFs()
 
 // PrepareTestConfig restores default config values. Used by testcases to
 // provide a pristine environment between tests.
 func PrepareTestConfig() {
-	ovsRunDir = savedOVSRunDir
-	ovnRunDir = savedOVNRunDir
+	ovsRunDir = config.OvsPaths.RunDir
+	ovnRunDir = config.OvnSouth.RunDir
+}
+
+// SetupMockOVSPidFile setup mock filesystem for ovs-vswitchd.pid file.
+func SetupMockOVSPidFile() error {
+	err := AppFs.MkdirAll("/var/run/openvswitch/", 0o755)
+	if err != nil {
+		return err
+	}
+	return afero.WriteFile(AppFs, "/var/run/openvswitch/ovs-vswitchd.pid", []byte("1234"), 0o644)
 }
 
 func runningPlatform() (string, error) {
@@ -167,7 +175,7 @@ func (runsvc *defaultExecRunner) RunCmd(cmd kexec.Cmd, cmdPath string, envVars [
 	return stdout, stderr, err
 }
 
-var runCmdExecRunner ExecRunner = &defaultExecRunner{}
+var RunCmdExecRunner ExecRunner = &defaultExecRunner{}
 
 // SetExec validates executable paths and saves the given exec interface
 // to be used for running various OVS and OVN utilites
@@ -197,12 +205,14 @@ func SetExec(exec kexec.Interface) error {
 		// openvswitch.
 		runner.ovnappctlPath = runner.appctlPath
 		runner.ovnctlPath = "/usr/share/openvswitch/scripts/ovn-ctl"
-		runner.ovnRunDir = ovsRunDir
+		runner.ovnRunDir = config.OvsPaths.RunDir
 	} else {
 		// If ovn-appctl command is available, it means OVN
 		// has its own separate rundir, logdir, sharedir.
 		runner.ovnctlPath = "/usr/share/ovn/scripts/ovn-ctl"
-		runner.ovnRunDir = ovnRunDir
+
+		// OvnNorth.RunDir should be the same as OvnSouth.RunDir.
+		runner.ovnRunDir = config.OvnNorth.RunDir
 	}
 
 	runner.nbctlPath, err = exec.LookPath(ovnNbctlCommand)
@@ -292,17 +302,17 @@ func ResetRunner() {
 var runCounter uint64
 
 func runCmd(cmd kexec.Cmd, cmdPath string, args ...string) (*bytes.Buffer, *bytes.Buffer, error) {
-	return runCmdExecRunner.RunCmd(cmd, cmdPath, []string{}, args...)
+	return RunCmdExecRunner.RunCmd(cmd, cmdPath, []string{}, args...)
 }
 
 func run(cmdPath string, args ...string) (*bytes.Buffer, *bytes.Buffer, error) {
 	cmd := runner.exec.Command(cmdPath, args...)
-	return runCmdExecRunner.RunCmd(cmd, cmdPath, []string{}, args...)
+	return RunCmdExecRunner.RunCmd(cmd, cmdPath, []string{}, args...)
 }
 
 func runWithEnvVars(cmdPath string, envVars []string, args ...string) (*bytes.Buffer, *bytes.Buffer, error) {
 	cmd := runner.exec.Command(cmdPath, args...)
-	return runCmdExecRunner.RunCmd(cmd, cmdPath, envVars, args...)
+	return RunCmdExecRunner.RunCmd(cmd, cmdPath, envVars, args...)
 }
 
 // RunOVSOfctl runs a command via ovs-ofctl.
@@ -361,11 +371,6 @@ func RunOVSAppctlWithTimeout(timeout int, args ...string) (string, string, error
 	return strings.Trim(strings.TrimSpace(stdout.String()), "\""), stderr.String(), err
 }
 
-// RunOVSAppctl runs a command via ovs-appctl.
-func RunOVSAppctl(args ...string) (string, string, error) {
-	return RunOVSAppctlWithTimeout(ovsCommandTimeout, args...)
-}
-
 // RunOVNAppctlWithTimeout runs a command via ovn-appctl. If ovn-appctl is not present, then it
 // falls back to using ovs-appctl.
 func RunOVNAppctlWithTimeout(timeout int, args ...string) (string, string, error) {
@@ -377,12 +382,21 @@ func RunOVNAppctlWithTimeout(timeout int, args ...string) (string, string, error
 
 // Run the ovn-ctl command and retry if "Connection refused"
 // poll waitng for service to become available
-// FIXME: Remove when https://github.com/ovn-org/libovsdb/issues/235 is fixed
-func runOVNretry(cmdPath string, envVars []string, args ...string) (*bytes.Buffer, *bytes.Buffer, error) {
-
+// FIXME: Remove when https://github.com/ovn-kubernetes/libovsdb/issues/235 is fixed
+func runOVNretry(cmdPath string, envVars []string, extraArgsFunc func() ([]string, error), args ...string) (*bytes.Buffer, *bytes.Buffer, error) {
 	retriesLeft := ovnCmdRetryCount
 	for {
-		stdout, stderr, err := runWithEnvVars(cmdPath, envVars, args...)
+		var cmdArgs []string
+		if extraArgsFunc != nil {
+			extraArgs, err := extraArgsFunc()
+			if err != nil {
+				return nil, nil, err
+			}
+			cmdArgs = append(cmdArgs, extraArgs...)
+		}
+		cmdArgs = append(cmdArgs, args...)
+
+		stdout, stderr, err := runWithEnvVars(cmdPath, envVars, cmdArgs...)
 		if err == nil {
 			return stdout, stderr, err
 		}
@@ -393,11 +407,12 @@ func runOVNretry(cmdPath string, envVars []string, args ...string) (*bytes.Buffe
 			if retriesLeft == 0 {
 				return stdout, stderr, err
 			}
+			klog.V(4).Infof("Command '%s %s' failed due to 'Connection refused', retrying %d more time(s)", cmdPath, strings.Join(cmdArgs, " "), retriesLeft)
 			retriesLeft--
-			time.Sleep(2 * time.Second)
+			time.Sleep(ovnCmdRetryInterval)
 		} else {
 			// Some other problem for caller to handle
-			return stdout, stderr, fmt.Errorf("OVN command '%s %s' failed: %s", cmdPath, strings.Join(args, " "), err)
+			return stdout, stderr, fmt.Errorf("OVN command '%s %s' failed: %s", cmdPath, strings.Join(cmdArgs, " "), err)
 		}
 	}
 }
@@ -434,28 +449,28 @@ func getNbOVSDBArgs(command string, args ...string) []string {
 }
 
 // RunOVNNbctlWithTimeout runs command via ovn-nbctl with a specific timeout
-// FIXME: Remove when https://github.com/ovn-org/libovsdb/issues/235 is fixed
+// FIXME: Remove when https://github.com/ovn-kubernetes/libovsdb/issues/235 is fixed
 func RunOVNNbctlWithTimeout(timeout int, args ...string) (string, string, error) {
 	stdout, stderr, err := RunOVNNbctlRawOutput(timeout, args...)
 	return strings.Trim(strings.TrimSpace(stdout), "\""), stderr, err
 }
 
 // RunOVNNbctlRawOutput returns the output with no trimming or other string manipulation
-// FIXME: Remove when https://github.com/ovn-org/libovsdb/issues/235 is fixed
+// FIXME: Remove when https://github.com/ovn-kubernetes/libovsdb/issues/235 is fixed
 func RunOVNNbctlRawOutput(timeout int, args ...string) (string, string, error) {
 	cmdArgs, envVars := getNbctlArgsAndEnv(timeout, args...)
-	stdout, stderr, err := runOVNretry(runner.nbctlPath, envVars, cmdArgs...)
+	stdout, stderr, err := runOVNretry(runner.nbctlPath, envVars, nil, cmdArgs...)
 	return stdout.String(), stderr.String(), err
 }
 
 // RunOVNNbctl runs a command via ovn-nbctl.
-// FIXME: Remove when https://github.com/ovn-org/libovsdb/issues/235 is fixed
+// FIXME: Remove when https://github.com/ovn-kubernetes/libovsdb/issues/235 is fixed
 func RunOVNNbctl(args ...string) (string, string, error) {
 	return RunOVNNbctlWithTimeout(ovsCommandTimeout, args...)
 }
 
 // RunOVNSbctlWithTimeout runs command via ovn-sbctl with a specific timeout
-// FIXME: Remove when https://github.com/ovn-org/libovsdb/issues/235 is fixed
+// FIXME: Remove when https://github.com/ovn-kubernetes/libovsdb/issues/235 is fixed
 func RunOVNSbctlWithTimeout(timeout int, args ...string) (string, string,
 	error) {
 	var cmdArgs []string
@@ -475,13 +490,13 @@ func RunOVNSbctlWithTimeout(timeout int, args ...string) (string, string,
 	cmdArgs = append(cmdArgs, fmt.Sprintf("--timeout=%d", timeout))
 	cmdArgs = append(cmdArgs, "--no-leader-only")
 	cmdArgs = append(cmdArgs, args...)
-	stdout, stderr, err := runOVNretry(runner.sbctlPath, nil, cmdArgs...)
+	stdout, stderr, err := runOVNretry(runner.sbctlPath, nil, nil, cmdArgs...)
 	return strings.Trim(strings.TrimSpace(stdout.String()), "\""), stderr.String(), err
 }
 
 // RunOVSDBClient runs an 'ovsdb-client [OPTIONS] COMMAND [ARG...] command'.
 func RunOVSDBClient(args ...string) (string, string, error) {
-	stdout, stderr, err := runOVNretry(runner.ovsdbClientPath, nil, args...)
+	stdout, stderr, err := runOVNretry(runner.ovsdbClientPath, nil, nil, args...)
 	return strings.Trim(strings.TrimSpace(stdout.String()), "\""), stderr.String(), err
 }
 
@@ -494,12 +509,12 @@ func RunOVSDBTool(args ...string) (string, string, error) {
 // RunOVSDBClientOVN runs an 'ovsdb-client [OPTIONS] COMMAND [SERVER] [ARG...] command' against OVN NB database.
 func RunOVSDBClientOVNNB(command string, args ...string) (string, string, error) {
 	cmdArgs := getNbOVSDBArgs(command, args...)
-	stdout, stderr, err := runOVNretry(runner.ovsdbClientPath, nil, cmdArgs...)
+	stdout, stderr, err := runOVNretry(runner.ovsdbClientPath, nil, nil, cmdArgs...)
 	return strings.Trim(strings.TrimSpace(stdout.String()), "\""), stderr.String(), err
 }
 
 // RunOVNSbctl runs a command via ovn-sbctl.
-// FIXME: Remove when https://github.com/ovn-org/libovsdb/issues/235 is fixed
+// FIXME: Remove when https://github.com/ovn-kubernetes/libovsdb/issues/235 is fixed
 func RunOVNSbctl(args ...string) (string, string, error) {
 	return RunOVNSbctlWithTimeout(ovsCommandTimeout, args...)
 }
@@ -513,13 +528,13 @@ func RunOVNNBAppCtlWithTimeout(timeout int, args ...string) (string, string, err
 
 // RunOVNNBAppCtl runs an 'ovn-appctl -t nbdbCtlFileName command'.
 func RunOVNNBAppCtl(args ...string) (string, string, error) {
-	var cmdArgs []string
-	cmdArgs = []string{
-		"-t",
-		runner.ovnRunDir + nbdbCtlFileName,
+	getSocketPath := func() ([]string, error) {
+		return []string{
+			"-t",
+			runner.ovnRunDir + nbdbCtlFileName,
+		}, nil
 	}
-	cmdArgs = append(cmdArgs, args...)
-	stdout, stderr, err := runOVNretry(runner.ovnappctlPath, nil, cmdArgs...)
+	stdout, stderr, err := runOVNretry(runner.ovnappctlPath, nil, getSocketPath, args...)
 	return strings.Trim(strings.TrimSpace(stdout.String()), "\""), stderr.String(), err
 }
 
@@ -532,71 +547,68 @@ func RunOVNSBAppCtlWithTimeout(timeout int, args ...string) (string, string, err
 
 // RunOVNSBAppCtl runs an 'ovn-appctl -t sbdbCtlFileName command'.
 func RunOVNSBAppCtl(args ...string) (string, string, error) {
-	var cmdArgs []string
-	cmdArgs = []string{
-		"-t",
-		runner.ovnRunDir + sbdbCtlFileName,
+	getSocketPath := func() ([]string, error) {
+		return []string{
+			"-t",
+			runner.ovnRunDir + sbdbCtlFileName,
+		}, nil
 	}
-	cmdArgs = append(cmdArgs, args...)
-	stdout, stderr, err := runOVNretry(runner.ovnappctlPath, nil, cmdArgs...)
+	stdout, stderr, err := runOVNretry(runner.ovnappctlPath, nil, getSocketPath, args...)
 	return strings.Trim(strings.TrimSpace(stdout.String()), "\""), stderr.String(), err
 }
 
 // RunOVNNorthAppCtl runs an 'ovs-appctl -t ovn-northd command'.
 // TODO: Currently no module is invoking this function, will need to consider adding an unit test when actively used
 func RunOVNNorthAppCtl(args ...string) (string, string, error) {
-	var cmdArgs []string
-
-	pid, err := afero.ReadFile(AppFs, runner.ovnRunDir+"ovn-northd.pid")
-	if err != nil {
-		return "", "", fmt.Errorf("failed to run the command since failed to get ovn-northd's pid: %v", err)
+	getSocketPath := func() ([]string, error) {
+		pid, err := afero.ReadFile(AppFs, runner.ovnRunDir+"ovn-northd.pid")
+		if err != nil {
+			return nil, fmt.Errorf("failed to run the command since failed to get ovn-northd's pid: %v", err)
+		}
+		return []string{
+			"-t",
+			runner.ovnRunDir + fmt.Sprintf("ovn-northd.%s.ctl", strings.TrimSpace(string(pid))),
+		}, nil
 	}
-
-	cmdArgs = []string{
-		"-t",
-		runner.ovnRunDir + fmt.Sprintf("ovn-northd.%s.ctl", strings.TrimSpace(string(pid))),
-	}
-	cmdArgs = append(cmdArgs, args...)
-	stdout, stderr, err := runOVNretry(runner.ovnappctlPath, nil, cmdArgs...)
+	stdout, stderr, err := runOVNretry(runner.ovnappctlPath, nil, getSocketPath, args...)
 	return strings.Trim(strings.TrimSpace(stdout.String()), "\""), stderr.String(), err
 }
 
 // RunOVNControllerAppCtl runs an 'ovs-appctl -t ovn-controller.pid.ctl command'.
 func RunOVNControllerAppCtl(args ...string) (string, string, error) {
-	var cmdArgs []string
-	pid, err := afero.ReadFile(AppFs, runner.ovnRunDir+"ovn-controller.pid")
-	if err != nil {
-		return "", "", fmt.Errorf("failed to get ovn-controller pid : %v", err)
+	getSocketPath := func() ([]string, error) {
+		pid, err := afero.ReadFile(AppFs, runner.ovnRunDir+"ovn-controller.pid")
+		if err != nil {
+			return nil, fmt.Errorf("failed to get ovn-controller pid : %v", err)
+		}
+		return []string{
+			"-t",
+			runner.ovnRunDir + fmt.Sprintf("ovn-controller.%s.ctl", strings.TrimSpace(string(pid))),
+		}, nil
 	}
-	cmdArgs = []string{
-		"-t",
-		runner.ovnRunDir + fmt.Sprintf("ovn-controller.%s.ctl", strings.TrimSpace(string(pid))),
-	}
-	cmdArgs = append(cmdArgs, args...)
-	stdout, stderr, err := runOVNretry(runner.ovnappctlPath, nil, cmdArgs...)
+	stdout, stderr, err := runOVNretry(runner.ovnappctlPath, nil, getSocketPath, args...)
 	return strings.Trim(strings.TrimSpace(stdout.String()), "\""), stderr.String(), err
 }
 
 // RunOvsVswitchdAppCtl runs an 'ovs-appctl -t /var/run/openvsiwthc/ovs-vswitchd.pid.ctl command'
 func RunOvsVswitchdAppCtl(args ...string) (string, string, error) {
-	var cmdArgs []string
-	pid, err := GetOvsVSwitchdPID()
-	if err != nil {
-		return "", "", err
+	getSocketPath := func() ([]string, error) {
+		pid, err := GetOvsVSwitchdPID()
+		if err != nil {
+			return nil, err
+		}
+		return []string{
+			"-t",
+			filepath.Join(config.OvsPaths.RunDir, fmt.Sprintf("ovs-vswitchd.%s.ctl", pid)),
+		}, nil
 	}
-
-	cmdArgs = []string{
-		"-t",
-		savedOVSRunDir + fmt.Sprintf("ovs-vswitchd.%s.ctl", pid),
-	}
-	cmdArgs = append(cmdArgs, args...)
-	stdout, stderr, err := runOVNretry(runner.appctlPath, nil, cmdArgs...)
+	stdout, stderr, err := runOVNretry(runner.appctlPath, nil, getSocketPath, args...)
 	return strings.Trim(strings.TrimSpace(stdout.String()), "\""), stderr.String(), err
 }
 
 // GetOvsVSwitchdPID retrieves the Process IDentifier for ovs-vswitchd daemon.
 func GetOvsVSwitchdPID() (string, error) {
-	pid, err := afero.ReadFile(AppFs, savedOVSRunDir+"ovs-vswitchd.pid")
+	pid, err := afero.ReadFile(AppFs, filepath.Join(config.OvsPaths.RunDir, "ovs-vswitchd.pid"))
 	if err != nil {
 		return "", fmt.Errorf("failed to get ovs-vswitch pid : %v", err)
 	}
@@ -606,7 +618,7 @@ func GetOvsVSwitchdPID() (string, error) {
 
 // GetOvsDBServerPID retrieves the Process IDentifier for ovs-vswitchd daemon.
 func GetOvsDBServerPID() (string, error) {
-	pid, err := afero.ReadFile(AppFs, savedOVSRunDir+"ovsdb-server.pid")
+	pid, err := afero.ReadFile(AppFs, filepath.Join(config.OvsPaths.RunDir, "ovsdb-server.pid"))
 	if err != nil {
 		return "", fmt.Errorf("failed to get ovsdb-server pid : %v", err)
 	}
@@ -658,11 +670,69 @@ func AddOFFlowWithSpecificAction(bridgeName, action string) (string, string, err
 	return strings.Trim(stdout.String(), "\" \n"), stderr.String(), err
 }
 
+// openFlowStdinReader incrementally renders a flow slice as a newline-delimited
+// stream for ovs-ofctl stdin without constructing one large joined string.
+type openFlowStdinReader struct {
+	flows      []string
+	flowIndex  int
+	flowOffset int
+	needEOL    bool
+}
+
+// Read implements io.Reader over r.flows, producing output equivalent to
+// strings.Join(flows, "\n"), but in small chunks to reduce peak allocations.
+func (r *openFlowStdinReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	// Fast path: no flows left and no pending delimiter.
+	if r.flowIndex >= len(r.flows) && !r.needEOL {
+		return 0, io.EOF
+	}
+
+	total := 0
+	for total < len(p) {
+		if r.needEOL {
+			// Emit exactly one '\n' between flows.
+			p[total] = '\n'
+			total++
+			r.needEOL = false
+			if total == len(p) {
+				return total, nil
+			}
+			continue
+		}
+
+		if r.flowIndex >= len(r.flows) {
+			break
+		}
+
+		flow := r.flows[r.flowIndex]
+		if r.flowOffset >= len(flow) {
+			// Current flow was fully consumed; advance and schedule delimiter if
+			// there is another flow.
+			r.flowIndex++
+			r.flowOffset = 0
+			r.needEOL = r.flowIndex < len(r.flows)
+			continue
+		}
+
+		// Copy as much of the current flow as fits in caller's buffer.
+		copied := copy(p[total:], flow[r.flowOffset:])
+		total += copied
+		r.flowOffset += copied
+	}
+
+	if total == 0 {
+		return 0, io.EOF
+	}
+	return total, nil
+}
+
 // ReplaceOFFlows replaces flows in the bridge with a slice of flows
 func ReplaceOFFlows(bridgeName string, flows []string) (string, string, error) {
 	args := []string{"-O", "OpenFlow13", "--bundle", "replace-flows", bridgeName, "-"}
-	stdin := &bytes.Buffer{}
-	stdin.Write([]byte(strings.Join(flows, "\n")))
+	stdin := &openFlowStdinReader{flows: flows}
 
 	cmd := runner.exec.Command(runner.ofctlPath, args...)
 	cmd.SetStdin(stdin)
@@ -742,7 +812,7 @@ type queryResult struct {
 }
 
 func GetOVNDBServerInfo(timeout int, direction, database string) (*OVNDBServerStatus, error) {
-	sockPath := fmt.Sprintf("unix:/var/run/openvswitch/ovn%s_db.sock", direction)
+	sockPath := fmt.Sprintf("unix:%s", filepath.Join(config.OvsPaths.RunDir, fmt.Sprintf("ovn%s_db.sock", direction)))
 	transact := fmt.Sprintf(`["_Server", {"op":"select", "table":"Database", "where":[["name", "==", "%s"]], `+
 		`"columns": ["connected", "leader", "index"]}]`, database)
 
@@ -774,34 +844,9 @@ func GetOVNDBServerInfo(timeout int, direction, database string) (*OVNDBServerSt
 	return serverStatus, nil
 }
 
-// DetectSCTPSupport checks if OVN supports SCTP for load balancer
-func DetectSCTPSupport() (bool, error) {
-	stdout, stderr, err := RunOVSDBClientOVNNB("list-columns", "--data=bare", "--no-heading",
-		"--format=json", "OVN_Northbound", "Load_Balancer")
-	if err != nil {
-		klog.Errorf("Failed to query OVN NB DB for SCTP support, "+
-			"stdout: %q, stderr: %q, error: %v", stdout, stderr, err)
-		return false, err
-	}
-	type OvsdbData struct {
-		Data [][]interface{}
-	}
-	var lbData OvsdbData
-	err = json.Unmarshal([]byte(stdout), &lbData)
-	if err != nil {
-		return false, err
-	}
-	for _, entry := range lbData.Data {
-		if entry[0].(string) == "protocol" && strings.Contains(fmt.Sprintf("%v", entry[1]), "sctp") {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
 // DetectCheckPktLengthSupport checks if OVN supports check packet length action in OVS kernel datapath
 func DetectCheckPktLengthSupport(bridge string) (bool, error) {
-	stdout, stderr, err := RunOVSAppctl("dpif/show-dp-features", bridge)
+	stdout, stderr, err := RunOvsVswitchdAppCtl("dpif/show-dp-features", bridge)
 	if err != nil {
 		klog.Errorf("Failed to query OVS for check packet length support, "+
 			"stdout: %q, stderr: %q, error: %v", stdout, stderr, err)
@@ -817,6 +862,18 @@ func DetectCheckPktLengthSupport(bridge string) (bool, error) {
 	}
 
 	return false, nil
+}
+
+// SetStaticFDBEntry programs a static MAC entry into the OVS FIB and disables MAC learning for this entry
+func SetStaticFDBEntry(bridge, port string, mac net.HardwareAddr) error {
+	// Assume default VLAN for local port
+	vlan := "0"
+	stdout, stderr, err := RunOvsVswitchdAppCtl("fdb/add", bridge, port, vlan, mac.String())
+	if err != nil {
+		return fmt.Errorf("failed to add FDB entry to OVS for LOCAL port, "+
+			"stdout: %q, stderr: %q, error: %v", stdout, stderr, err)
+	}
+	return nil
 }
 
 // IsOvsHwOffloadEnabled checks if OvS Hardware Offload is enabled.
@@ -888,10 +945,10 @@ func GetOVSPortPodInfo(hostIfName string) (bool, string, string, error) {
 		return false, "", "", nil
 	}
 	sandbox := GetExternalIDValByKey(stdout, "sandbox")
-	nadName := GetExternalIDValByKey(stdout, types.NADExternalID)
+	nadkey := GetExternalIDValByKey(stdout, types.NADExternalID)
 	// if network_name does not exists, it is default network
-	if nadName == "" {
-		nadName = types.DefaultNetworkName
+	if nadkey == "" {
+		nadkey = types.DefaultNetworkName
 	}
-	return true, sandbox, nadName, nil
+	return true, sandbox, nadkey, nil
 }

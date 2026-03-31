@@ -11,17 +11,19 @@ import (
 	"net/netip"
 	"reflect"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/mdlayher/arp"
 	"github.com/vishvananda/netlink"
+	"github.com/vishvananda/netlink/nl"
 	"golang.org/x/sys/unix"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 	utilnet "k8s.io/utils/net"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
 )
 
 type NetLinkOps interface {
@@ -30,7 +32,9 @@ type NetLinkOps interface {
 	LinkByIndex(index int) (netlink.Link, error)
 	LinkSetDown(link netlink.Link) error
 	LinkAdd(link netlink.Link) error
+	LinkModify(link netlink.Link) error
 	LinkDelete(link netlink.Link) error
+	LinkSetAlias(link netlink.Link, name string) error
 	LinkSetName(link netlink.Link, newName string) error
 	LinkSetUp(link netlink.Link) error
 	LinkSetNsFd(link netlink.Link, fd int) error
@@ -49,13 +53,33 @@ type NetLinkOps interface {
 	RouteReplace(route *netlink.Route) error
 	RouteListFiltered(family int, filter *netlink.Route, filterMask uint64) ([]netlink.Route, error)
 	RuleListFiltered(family int, filter *netlink.Rule, filterMask uint64) ([]netlink.Rule, error)
+	RuleAdd(rule *netlink.Rule) error
 	NeighAdd(neigh *netlink.Neigh) error
 	NeighDel(neigh *netlink.Neigh) error
 	NeighList(linkIndex, family int) ([]netlink.Neigh, error)
-	ConntrackDeleteFilter(table netlink.ConntrackTableType, family netlink.InetFamily, filter netlink.CustomConntrackFilter) (uint, error)
+	ConntrackDeleteFilters(table netlink.ConntrackTableType, family netlink.InetFamily, filters ...netlink.CustomConntrackFilter) (uint, error)
 	LinkSetVfHardwareAddr(pfLink netlink.Link, vfIndex int, hwaddr net.HardwareAddr) error
 	RouteSubscribeWithOptions(ch chan<- netlink.RouteUpdate, done <-chan struct{}, options netlink.RouteSubscribeOptions) error
 	LinkSubscribeWithOptions(ch chan<- netlink.LinkUpdate, done <-chan struct{}, options netlink.LinkSubscribeOptions) error
+	// Error checking helpers
+	IsEntryNotFoundError(err error) bool
+	IsAlreadyExistsError(err error) bool
+	// Bridge VLAN operations
+	BridgeVlanAdd(link netlink.Link, vid uint16, pvid, untagged, self, master bool) error
+	BridgeVlanDel(link netlink.Link, vid uint16, pvid, untagged, self, master bool) error
+	BridgeVniAdd(link netlink.Link, vni uint32) error
+	BridgeVniDel(link netlink.Link, vni uint32) error
+	BridgeVlanAddTunnelInfo(link netlink.Link, vid uint16, vni uint32, self, master bool) error
+	BridgeVlanDelTunnelInfo(link netlink.Link, vid uint16, vni uint32, self, master bool) error
+	BridgeVlanTunnelShowDev(link netlink.Link) ([]nl.TunnelInfo, error)
+	BridgeVlanList() (map[int32][]*nl.BridgeVlanInfo, error)
+	BridgeVniList() (map[int32][]*nl.BridgeVniInfo, error)
+	// Bridge port settings
+	LinkSetVlanTunnel(link netlink.Link, mode bool) error
+	LinkSetBrNeighSuppress(link netlink.Link, mode bool) error
+	LinkSetLearning(link netlink.Link, mode bool) error
+	LinkSetIsolated(link netlink.Link, mode bool) error
+	LinkGetProtinfo(link netlink.Link) (netlink.Protinfo, error)
 }
 
 type defaultNetLinkOps struct {
@@ -98,6 +122,14 @@ func (defaultNetLinkOps) LinkAdd(link netlink.Link) error {
 	return netlink.LinkAdd(link)
 }
 
+func (defaultNetLinkOps) LinkModify(link netlink.Link) error {
+	return netlink.LinkModify(link)
+}
+
+func (defaultNetLinkOps) LinkSetAlias(link netlink.Link, name string) error {
+	return netlink.LinkSetAlias(link, name)
+}
+
 func (defaultNetLinkOps) LinkDelete(link netlink.Link) error {
 	return netlink.LinkDel(link)
 }
@@ -138,6 +170,20 @@ func (defaultNetLinkOps) IsLinkNotFoundError(err error) bool {
 	return reflect.TypeOf(err) == reflect.TypeOf(netlink.LinkNotFoundError{})
 }
 
+// IsEntryNotFoundError checks if an error indicates an entry was not found.
+// This covers ENOENT (entry not found), ENODEV (device not found, which can
+// occur if the device is deleted after we obtained the link handle), and
+// EADDRNOTAVAIL (address not found, returned by RTM_DELADDR for non-existent addresses).
+func (defaultNetLinkOps) IsEntryNotFoundError(err error) bool {
+	return errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ENODEV) || errors.Is(err, syscall.EADDRNOTAVAIL)
+}
+
+// IsAlreadyExistsError checks if an error indicates an entry already exists.
+// Used for idempotent add operations where EEXIST is expected and acceptable.
+func (defaultNetLinkOps) IsAlreadyExistsError(err error) bool {
+	return errors.Is(err, syscall.EEXIST)
+}
+
 func (defaultNetLinkOps) AddrList(link netlink.Link, family int) ([]netlink.Addr, error) {
 	return netlink.AddrList(link, family)
 }
@@ -174,6 +220,10 @@ func (defaultNetLinkOps) RuleListFiltered(family int, filter *netlink.Rule, filt
 	return netlink.RuleListFiltered(family, filter, filterMask)
 }
 
+func (defaultNetLinkOps) RuleAdd(rule *netlink.Rule) error {
+	return netlink.RuleAdd(rule)
+}
+
 func (defaultNetLinkOps) NeighAdd(neigh *netlink.Neigh) error {
 	return netlink.NeighAdd(neigh)
 }
@@ -186,8 +236,8 @@ func (defaultNetLinkOps) NeighList(linkIndex, family int) ([]netlink.Neigh, erro
 	return netlink.NeighList(linkIndex, family)
 }
 
-func (defaultNetLinkOps) ConntrackDeleteFilter(table netlink.ConntrackTableType, family netlink.InetFamily, filter netlink.CustomConntrackFilter) (uint, error) {
-	return netlink.ConntrackDeleteFilter(table, family, filter)
+func (defaultNetLinkOps) ConntrackDeleteFilters(table netlink.ConntrackTableType, family netlink.InetFamily, filters ...netlink.CustomConntrackFilter) (uint, error) {
+	return netlink.ConntrackDeleteFilters(table, family, filters...)
 }
 
 func (defaultNetLinkOps) RouteSubscribeWithOptions(ch chan<- netlink.RouteUpdate, done <-chan struct{}, options netlink.RouteSubscribeOptions) error {
@@ -196,6 +246,62 @@ func (defaultNetLinkOps) RouteSubscribeWithOptions(ch chan<- netlink.RouteUpdate
 
 func (defaultNetLinkOps) LinkSubscribeWithOptions(ch chan<- netlink.LinkUpdate, done <-chan struct{}, options netlink.LinkSubscribeOptions) error {
 	return netlink.LinkSubscribeWithOptions(ch, done, options)
+}
+
+func (defaultNetLinkOps) BridgeVlanAdd(link netlink.Link, vid uint16, pvid, untagged, self, master bool) error {
+	return netlink.BridgeVlanAdd(link, vid, pvid, untagged, self, master)
+}
+
+func (defaultNetLinkOps) BridgeVlanDel(link netlink.Link, vid uint16, pvid, untagged, self, master bool) error {
+	return netlink.BridgeVlanDel(link, vid, pvid, untagged, self, master)
+}
+
+func (defaultNetLinkOps) BridgeVniAdd(link netlink.Link, vni uint32) error {
+	return netlink.BridgeVniAdd(link, vni)
+}
+
+func (defaultNetLinkOps) BridgeVniDel(link netlink.Link, vni uint32) error {
+	return netlink.BridgeVniDel(link, vni)
+}
+
+func (defaultNetLinkOps) BridgeVlanAddTunnelInfo(link netlink.Link, vid uint16, vni uint32, self, master bool) error {
+	return netlink.BridgeVlanAddTunnelInfo(link, vid, vni, self, master)
+}
+
+func (defaultNetLinkOps) BridgeVlanDelTunnelInfo(link netlink.Link, vid uint16, vni uint32, self, master bool) error {
+	return netlink.BridgeVlanDelTunnelInfo(link, vid, vni, self, master)
+}
+
+func (defaultNetLinkOps) BridgeVlanTunnelShowDev(link netlink.Link) ([]nl.TunnelInfo, error) {
+	return netlink.BridgeVlanTunnelShowDev(link)
+}
+
+func (defaultNetLinkOps) BridgeVlanList() (map[int32][]*nl.BridgeVlanInfo, error) {
+	return netlink.BridgeVlanList()
+}
+
+func (defaultNetLinkOps) BridgeVniList() (map[int32][]*nl.BridgeVniInfo, error) {
+	return netlink.BridgeVniList()
+}
+
+func (defaultNetLinkOps) LinkSetVlanTunnel(link netlink.Link, mode bool) error {
+	return netlink.LinkSetVlanTunnel(link, mode)
+}
+
+func (defaultNetLinkOps) LinkSetBrNeighSuppress(link netlink.Link, mode bool) error {
+	return netlink.LinkSetBrNeighSuppress(link, mode)
+}
+
+func (defaultNetLinkOps) LinkSetLearning(link netlink.Link, mode bool) error {
+	return netlink.LinkSetLearning(link, mode)
+}
+
+func (defaultNetLinkOps) LinkSetIsolated(link netlink.Link, mode bool) error {
+	return netlink.LinkSetIsolated(link, mode)
+}
+
+func (defaultNetLinkOps) LinkGetProtinfo(link netlink.Link) (netlink.Protinfo, error) {
+	return netlink.LinkGetProtinfo(link)
 }
 
 func getFamily(ip net.IP) int {
@@ -409,7 +515,7 @@ func LinkRoutesDel(link netlink.Link, subnets []*net.IPNet) error {
 		if len(subnets) == 0 {
 			err = netLinkOps.RouteDel(&route)
 			if err != nil {
-				return fmt.Errorf("failed to delete route '%s via %s' for link %s : %v\n",
+				return fmt.Errorf("failed to delete route '%s via %s' for link %s : %v",
 					route.Dst.String(), route.Gw.String(), link.Attrs().Name, err)
 			}
 			continue
@@ -430,7 +536,7 @@ func LinkRoutesDel(link netlink.Link, subnets []*net.IPNet) error {
 					if route.Dst != nil {
 						net = route.Dst.String()
 					}
-					return fmt.Errorf("failed to delete route '%s via %s' for link %s : %v\n",
+					return fmt.Errorf("failed to delete route '%s via %s' for link %s : %v",
 						net, route.Gw.String(), link.Attrs().Name, err)
 				}
 				break
@@ -582,65 +688,64 @@ func LinkNeighIPExists(link netlink.Link, neighIP net.IP) (bool, error) {
 	return false, nil
 }
 
-func DeleteConntrack(ip string, port int32, protocol corev1.Protocol, ipFilterType netlink.ConntrackFilterType, labels [][]byte) error {
+func DeleteConntrack(ip string, port int32, protocol corev1.Protocol, ipFilterType netlink.ConntrackFilterType, labels [][]byte) (uint, error) {
 	ipAddress := net.ParseIP(ip)
 	if ipAddress == nil {
-		return fmt.Errorf("value %q passed to DeleteConntrack is not an IP address", ipAddress)
+		return 0, fmt.Errorf("value %q passed to DeleteConntrack is not an IP address", ip)
 	}
 
 	filter := &netlink.ConntrackFilter{}
 	if protocol == corev1.ProtocolUDP {
 		// 17 = UDP protocol
 		if err := filter.AddProtocol(17); err != nil {
-			return fmt.Errorf("could not add Protocol UDP to conntrack filter %v", err)
+			return 0, fmt.Errorf("could not add Protocol UDP to conntrack filter %v", err)
 		}
 	} else if protocol == corev1.ProtocolSCTP {
 		// 132 = SCTP protocol
 		if err := filter.AddProtocol(132); err != nil {
-			return fmt.Errorf("could not add Protocol SCTP to conntrack filter %v", err)
+			return 0, fmt.Errorf("could not add Protocol SCTP to conntrack filter %v", err)
 		}
 	} else if protocol == corev1.ProtocolTCP {
 		// 6 = TCP protocol
 		if err := filter.AddProtocol(6); err != nil {
-			return fmt.Errorf("could not add Protocol TCP to conntrack filter %v", err)
+			return 0, fmt.Errorf("could not add Protocol TCP to conntrack filter %v", err)
 		}
 	}
 	if port > 0 {
 		if err := filter.AddPort(netlink.ConntrackOrigDstPort, uint16(port)); err != nil {
-			return fmt.Errorf("could not add port %d to conntrack filter: %v", port, err)
+			return 0, fmt.Errorf("could not add port %d to conntrack filter: %v", port, err)
 		}
 	}
 	if err := filter.AddIP(ipFilterType, ipAddress); err != nil {
-		return fmt.Errorf("could not add IP: %s to conntrack filter: %v", ipAddress, err)
+		return 0, fmt.Errorf("could not add IP: %s to conntrack filter: %v", ipAddress, err)
 	}
 
 	if len(labels) > 0 {
 		// for now we only need unmatch label, we can add match label later if needed
 		if err := filter.AddLabels(netlink.ConntrackUnmatchLabels, labels); err != nil {
-			return fmt.Errorf("could not add label %s to conntrack filter: %v", labels, err)
+			return 0, fmt.Errorf("could not add label %s to conntrack filter: %v", labels, err)
 		}
 	}
+	klog.V(5).Infof("Deleting conntrack entry for IP %s, port %d, protocol %s, conntrack filter type %v, labels %x", ip, port, protocol, ipFilterType, labels)
+	var matched uint
+	var err error
 	if ipAddress.To4() != nil {
-		if _, err := netLinkOps.ConntrackDeleteFilter(netlink.ConntrackTable, netlink.FAMILY_V4, filter); err != nil {
-			return err
-		}
+		matched, err = netLinkOps.ConntrackDeleteFilters(netlink.ConntrackTable, netlink.FAMILY_V4, filter)
 	} else {
-		if _, err := netLinkOps.ConntrackDeleteFilter(netlink.ConntrackTable, netlink.FAMILY_V6, filter); err != nil {
-			return err
-		}
+		matched, err = netLinkOps.ConntrackDeleteFilters(netlink.ConntrackTable, netlink.FAMILY_V6, filter)
 	}
-	return nil
+	return matched, err
 }
 
 // DeleteConntrackServicePort is a wrapper around DeleteConntrack for the purpose of deleting conntrack entries that
 // belong to ServicePorts. Before deleting any conntrack entry, it makes sure that the port is valid. If the port is
 // invalid, it will log a level 5 info message and simply return.
 func DeleteConntrackServicePort(ip string, port int32, protocol corev1.Protocol, ipFilterType netlink.ConntrackFilterType,
-	labels [][]byte) error {
+	labels [][]byte) (uint, error) {
 	if err := ValidatePort(protocol, port); err != nil {
 		klog.V(5).Infof("Skipping conntrack deletion for IP %q, protocol %q, port \"%d\", err: %q",
 			ip, protocol, port, err)
-		return nil
+		return 0, nil
 	}
 	return DeleteConntrack(ip, port, protocol, ipFilterType, labels)
 }
@@ -851,4 +956,33 @@ func ipAddrExistsAtInterface(ipAddr net.IP, iface net.Interface) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// SetforwardingModeForInterface update the forwarding options for the specified interface
+func SetforwardingModeForInterface(ifName string) error {
+	// we use forward slash as path separator to allow dotted interfaceName e.g. foo.200
+	stdout, stderr, err := RunSysctl("-w", fmt.Sprintf("net/ipv4/conf/%s/forwarding=1", ifName))
+	// systctl output enforces dot as path separator
+	if err != nil || stdout != fmt.Sprintf("net.ipv4.conf.%s.forwarding = 1", strings.ReplaceAll(ifName, ".", "/")) {
+		return fmt.Errorf("could not set the correct forwarding value for interface %s: stdout: %v, stderr: %v, err: %v",
+			ifName, stdout, stderr, err)
+	}
+	return nil
+}
+
+// SetRPFilterLooseModeForInterface update the reverse path filtering options for the specified interface
+func SetRPFilterLooseModeForInterface(ifName string) error {
+	// update the reverse path filtering options for the specified interface to avoid dropping packets with masqueradeIP
+	// coming out of managementport interface
+	// NOTE: v6 doesn't have rp_filter strict mode block
+	rpFilterLooseMode := "2"
+	// TODO: Convert testing framework to mock golang module utilities. Example:
+	// we use forward slash as path separator to allow dotted mgmtPortName e.g. foo.200
+	stdout, stderr, err := RunSysctl("-w", fmt.Sprintf("net/ipv4/conf/%s/rp_filter=%s", ifName, rpFilterLooseMode))
+	// systctl output enforces dot as path separator
+	if err != nil || stdout != fmt.Sprintf("net.ipv4.conf.%s.rp_filter = %s", strings.ReplaceAll(ifName, ".", "/"), rpFilterLooseMode) {
+		return fmt.Errorf("could not set the correct rp_filter value for interface %s: stdout: %v, stderr: %v, err: %v",
+			ifName, stdout, stderr, err)
+	}
+	return nil
 }

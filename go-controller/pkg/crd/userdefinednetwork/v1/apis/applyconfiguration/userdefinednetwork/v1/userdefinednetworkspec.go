@@ -18,15 +18,24 @@ limitations under the License.
 package v1
 
 import (
-	v1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1"
+	userdefinednetworkv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1"
 )
 
 // UserDefinedNetworkSpecApplyConfiguration represents a declarative configuration of the UserDefinedNetworkSpec type for use
 // with apply.
+//
+// UserDefinedNetworkSpec defines the desired state of UserDefinedNetworkSpec.
 type UserDefinedNetworkSpecApplyConfiguration struct {
-	Topology *v1.NetworkTopology             `json:"topology,omitempty"`
-	Layer3   *Layer3ConfigApplyConfiguration `json:"layer3,omitempty"`
-	Layer2   *Layer2ConfigApplyConfiguration `json:"layer2,omitempty"`
+	// Topology describes network configuration.
+	//
+	// Allowed values are "Layer3", "Layer2".
+	// Layer3 topology creates a layer 2 segment per node, each with a different subnet. Layer 3 routing is used to interconnect node subnets.
+	// Layer2 topology creates one logical switch shared by all nodes.
+	Topology *userdefinednetworkv1.NetworkTopology `json:"topology,omitempty"`
+	// Layer3 is the Layer3 topology configuration.
+	Layer3 *Layer3ConfigApplyConfiguration `json:"layer3,omitempty"`
+	// Layer2 is the Layer2 topology configuration.
+	Layer2 *Layer2ConfigApplyConfiguration `json:"layer2,omitempty"`
 }
 
 // UserDefinedNetworkSpecApplyConfiguration constructs a declarative configuration of the UserDefinedNetworkSpec type for use with
@@ -38,7 +47,7 @@ func UserDefinedNetworkSpec() *UserDefinedNetworkSpecApplyConfiguration {
 // WithTopology sets the Topology field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the Topology field is set to the value of the last call.
-func (b *UserDefinedNetworkSpecApplyConfiguration) WithTopology(value v1.NetworkTopology) *UserDefinedNetworkSpecApplyConfiguration {
+func (b *UserDefinedNetworkSpecApplyConfiguration) WithTopology(value userdefinednetworkv1.NetworkTopology) *UserDefinedNetworkSpecApplyConfiguration {
 	b.Topology = &value
 	return b
 }

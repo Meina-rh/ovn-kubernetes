@@ -18,7 +18,7 @@ limitations under the License.
 package fake
 
 import (
-	v1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1/apis/clientset/versioned/typed/egressservice/v1"
+	v1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1/apis/clientset/versioned/typed/egressservice/v1"
 	rest "k8s.io/client-go/rest"
 	testing "k8s.io/client-go/testing"
 )
@@ -28,7 +28,7 @@ type FakeK8sV1 struct {
 }
 
 func (c *FakeK8sV1) EgressServices(namespace string) v1.EgressServiceInterface {
-	return &FakeEgressServices{c, namespace}
+	return newFakeEgressServices(c, namespace)
 }
 
 // RESTClient returns a RESTClient that is used to communicate

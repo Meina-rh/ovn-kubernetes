@@ -11,19 +11,18 @@ PKGS ?=
 GOPATH ?= $(shell go env GOPATH)
 TEST_REPORT_DIR?=$(CURDIR)/_artifacts
 export TEST_REPORT_DIR
-GO_VERSION ?= 1.22.0
-GO_DOCKER_IMG = quay.io/giantswarm/golang:${GO_VERSION}
+GO_VERSION ?= 1.25
+GO_DOCKER_IMG = quay.io/projectquay/golang:${GO_VERSION}
 # CONTAINER_RUNNABLE determines if the tests can be run inside a container. It checks to see if
 # podman/docker is installed on the system.
 PODMAN ?= $(shell podman -v > /dev/null 2>&1; echo $$?)
 ifeq ($(PODMAN), 0)
-CONTAINER_RUNTIME=podman
+CONTAINER_RUNTIME?=podman
 else
-CONTAINER_RUNTIME=docker
+CONTAINER_RUNTIME?=docker
 endif
 CONTAINER_RUNNABLE ?= $(shell $(CONTAINER_RUNTIME) -v > /dev/null 2>&1; echo $$?)
-# FIXME(tssurya): In one week when OVN 24.09 is released change the schema version
-OVN_SCHEMA_VERSION ?= 8efac26f6637fc
+OVN_SCHEMA_VERSION ?= v25.09.2
 OVS_VERSION ?= v2.17.0
 ifeq ($(NOROOT),TRUE)
 C_ARGS = -e NOROOT=TRUE
@@ -36,7 +35,7 @@ TOOLS_OUTPUT_DIR = ${CURDIR}/${OUT_DIR}
 MOCKERY = ${TOOLS_OUTPUT_DIR}/mockery-${MOCKERY_VERSION}
 
 ## Tool Versions
-MOCKERY_VERSION ?= v2.43.2
+MOCKERY_VERSION ?= v2.53.4
 
 export NOROOT
 
@@ -61,7 +60,7 @@ windows:
 # tests in a container. Refer: https://www.projectatomic.io/blog/2016/03/dwalsh_selinux_containers/ for additional context
 check test:
 ifeq ($(CONTAINER_RUNNABLE), 0)
-	$(CONTAINER_RUNTIME) run -it --rm --security-opt label=disable ${C_ARGS} -v $(shell dirname $(PWD)):/go/src/github.com/ovn-org/ovn-kubernetes -w /go/src/github.com/ovn-org/ovn-kubernetes/go-controller -e COVERALLS=${COVERALLS} -e GINKGO_FOCUS="${GINKGO_FOCUS}" $(GO_DOCKER_IMG) sh -c "RACE=1 DOCKER_TEST=1 COVERALLS=${COVERALLS} PKGS="${PKGS}" hack/test-go.sh focus \"${GINKGO_FOCUS}\" "
+	$(CONTAINER_RUNTIME) run -it --rm --security-opt label=disable ${C_ARGS} -v $(shell dirname $(PWD)):/go/src/github.com/ovn-kubernetes/ovn-kubernetes -w /go/src/github.com/ovn-kubernetes/ovn-kubernetes/go-controller -e COVERALLS=${COVERALLS} -e GINKGO_FOCUS="${GINKGO_FOCUS}" $(GO_DOCKER_IMG) sh -c "RACE=1 DOCKER_TEST=1 COVERALLS=${COVERALLS} PKGS="${PKGS}" hack/test-go.sh focus \"${GINKGO_FOCUS}\" "
 else
 	RACE=1 hack/test-go.sh
 endif
@@ -93,14 +92,25 @@ clean:
 
 lint:
 ifeq ($(CONTAINER_RUNNABLE), 0)
-	@GOPATH=${GOPATH} ./hack/lint.sh $(CONTAINER_RUNTIME)
+	@GOPATH=${GOPATH} ./hack/lint.sh $(CONTAINER_RUNTIME) || { echo "lint failed! Try running 'make lint-fix'"; exit 1; }
 else
-	echo "linter can only be run within a container since it needs a specific golangci-lint version"
+	echo "no container runtime. attempting to run natively";
+	@GOPATH=${GOPATH} ./hack/lint.sh run-natively || { echo "running lint locally failed!"; exit 1; }
+endif
+
+lint-fix:
+ifeq ($(CONTAINER_RUNNABLE), 0)
+	@GOPATH=${GOPATH} ./hack/lint.sh $(CONTAINER_RUNTIME) fix || { echo "ERROR: lint fix failed! There is a bug that changes file ownership to root \
+	when this happens. To fix it, simply run 'chown -R <user>:<group> *' from the repo root."; exit 1; }
+else
+	echo "no container runtime. attempting to run natively w/ -fix flag";
+	@GOPATH=${GOPATH} ./hack/lint.sh run-natively fix || { echo "running lint fix locally failed! There is a bug that changes file ownership to root \
+	when this happens. To fix it, simply run 'chown -R <user>:<group> *' from the repo root."; exit 1; }
 endif
 
 gofmt:
 ifeq ($(CONTAINER_RUNNABLE), 0)
-	$(CONTAINER_RUNTIME) run -it --rm --security-opt label=disable -v $(shell dirname $(PWD)):/go/src/github.com/ovn-org/ovn-kubernetes -w /go/src/github.com/ovn-org/ovn-kubernetes/go-controller $(GO_DOCKER_IMG) hack/verify-gofmt.sh
+	$(CONTAINER_RUNTIME) run -it --rm --security-opt label=disable -v $(shell dirname $(PWD)):/go/src/github.com/ovn-kubernetes/ovn-kubernetes -w /go/src/github.com/ovn-kubernetes/ovn-kubernetes/go-controller $(GO_DOCKER_IMG) hack/verify-gofmt.sh
 else
 	@./hack/verify-gofmt.sh
 endif

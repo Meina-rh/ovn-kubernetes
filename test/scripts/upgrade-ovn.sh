@@ -6,15 +6,22 @@ set -ex
 export KUBECONFIG=${KUBECONFIG:-${HOME}/ovn.conf}
 export OVN_IMAGE=${OVN_IMAGE:-ovn-daemonset-fedora:pr}
 
+set -ex
+ARCH=""
+case $(uname -m) in
+    x86_64)  ARCH="amd64" ;;
+    aarch64) ARCH="arm64"   ;;
+esac
+
 kubectl_wait_pods() {
   # Check that everything is fine and running. IPv6 cluster seems to take a little
   # longer to come up, so extend the wait time.
   OVN_TIMEOUT=900s
-  if [ "$KIND_IPV6_SUPPORT" == true ]; then
+  if [ "$PLATFORM_IPV6_SUPPORT" == true ]; then
     OVN_TIMEOUT=1400s
   fi
   if ! kubectl wait -n ovn-kubernetes --for=condition=ready pods --all --timeout=${OVN_TIMEOUT} ; then
-    echo "some pods in OVN Kubernetes are not running"
+    echo "some pods in OVN-Kubernetes are not running"
     kubectl get pods -A -o wide || true
     kubectl describe po -n ovn-kubernetes
     exit 1
@@ -38,8 +45,8 @@ kubectl_wait_daemonset(){
     READY_REPLICAS=$(run_kubectl get daemonsets.apps $1 -n ovn-kubernetes -o=jsonpath='{.status.numberReady}')
     echo "CURRENT READY REPLICAS: $READY_REPLICAS, CURRENT DESIRED REPLICAS: $DESIRED_REPLICAS for the DaemonSet $1"
     if [[ $READY_REPLICAS -eq $DESIRED_REPLICAS ]]; then
-      UP_TO_DATE_REPLICAS=$(run_kubectl get daemonsets.apps ovnkube-node -n ovn-kubernetes  -o=jsonpath='{.status.updatedNumberScheduled}')
-      echo "CURRENT UP TO DATE REPLICAS: $UP_TO_DATE_REPLICAS for the Deployment $1"
+      UP_TO_DATE_REPLICAS=$(run_kubectl get daemonsets.apps $1 -n ovn-kubernetes  -o=jsonpath='{.status.updatedNumberScheduled}')
+      echo "CURRENT UP TO DATE REPLICAS: $UP_TO_DATE_REPLICAS for the DaemonSet $1"
       if [[ $READY_REPLICAS -eq $UP_TO_DATE_REPLICAS ]]; then
         break
       fi
@@ -51,7 +58,6 @@ kubectl_wait_daemonset(){
       exit 1
     fi
   done
-  
 }
 
 kubectl_wait_deployment(){
@@ -65,7 +71,7 @@ kubectl_wait_deployment(){
     READY_REPLICAS=$(run_kubectl get deployments.apps $1 -n ovn-kubernetes -o=jsonpath='{.status.readyReplicas}')
     echo "CURRENT READY REPLICAS: $READY_REPLICAS, CURRENT DESIRED REPLICAS: $DESIRED_REPLICAS for the Deployment $1"
     if [[ $READY_REPLICAS -eq $DESIRED_REPLICAS ]]; then
-      UP_TO_DATE_REPLICAS=$(run_kubectl get deployments.apps ovnkube-master -n ovn-kubernetes -o=jsonpath='{.status.updatedReplicas}')
+      UP_TO_DATE_REPLICAS=$(run_kubectl get deployments.apps $1 -n ovn-kubernetes -o=jsonpath='{.status.updatedReplicas}')
       echo "CURRENT UP TO DATE REPLICAS: $UP_TO_DATE_REPLICAS for the Deployment $1"
       if [[ $READY_REPLICAS -eq $UP_TO_DATE_REPLICAS ]]; then
         break
@@ -124,6 +130,7 @@ create_ovn_kube_manifests() {
     --net-cidr="${NET_CIDR}" \
     --svc-cidr="${SVC_CIDR}" \
     --gateway-mode="${OVN_GATEWAY_MODE}" \
+    --enable-interconnect="${OVN_ENABLE_INTERCONNECT}" \
     --hybrid-enabled="${OVN_HYBRID_OVERLAY_ENABLE}" \
     --disable-snat-multiple-gws="${OVN_DISABLE_SNAT_MULTIPLE_GWS}" \
     --disable-forwarding="${OVN_DISABLE_FORWARDING}" \
@@ -142,6 +149,7 @@ create_ovn_kube_manifests() {
     --ovn-loglevel-controller="${OVN_LOG_LEVEL_CONTROLLER}" \
     --egress-ip-enable=true \
     --egress-firewall-enable=true \
+    --enable-coredumps=true \
     --v4-join-subnet="${JOIN_SUBNET_IPV4}" \
     --v6-join-subnet="${JOIN_SUBNET_IPV6}" \
     --ex-gw-network-interface="${OVN_EX_GW_NETWORK_INTERFACE}" \
@@ -151,13 +159,14 @@ create_ovn_kube_manifests() {
 
 set_default_ovn_manifest_params() {
   # Set default values
-  # kind configs 
-  KIND_IPV4_SUPPORT=${KIND_IPV4_SUPPORT:-true}
-  KIND_IPV6_SUPPORT=${KIND_IPV6_SUPPORT:-false}
+  # kind configs
+  PLATFORM_IPV4_SUPPORT=${PLATFORM_IPV4_SUPPORT:-true}
+  PLATFORM_IPV6_SUPPORT=${PLATFORM_IPV6_SUPPORT:-false}
   OVN_HA=${OVN_HA:-false}
   OVN_ENABLE_OVNKUBE_IDENTITY=${OVN_ENABLE_OVNKUBE_IDENTITY:-true}
   # ovn configs 
   OVN_GATEWAY_MODE=${OVN_GATEWAY_MODE:-shared}
+  OVN_ENABLE_INTERCONNECT=${OVN_ENABLE_INTERCONNECT:-true}
   OVN_HYBRID_OVERLAY_ENABLE=${OVN_HYBRID_OVERLAY_ENABLE:-false}
   OVN_DISABLE_SNAT_MULTIPLE_GWS=${OVN_DISABLE_SNAT_MULTIPLE_GWS:-false}
   OVN_DISABLE_FORWARDING=${OVN_DISABLE_FORWARDING:-false}
@@ -203,10 +212,11 @@ set_default_ovn_manifest_params() {
 print_ovn_manifest_params() {
      echo "Using these parameters to build upgraded ovn-k manifests"
      echo ""
-     echo "KIND_IPV4_SUPPORT = $KIND_IPV4_SUPPORT"
-     echo "KIND_IPV6_SUPPORT = $KIND_IPV6_SUPPORT"
+     echo "PLATFORM_IPV4_SUPPORT = $PLATFORM_IPV4_SUPPORT"
+     echo "PLATFORM_IPV6_SUPPORT = $PLATFORM_IPV6_SUPPORT"
      echo "OVN_HA = $OVN_HA"
      echo "OVN_GATEWAY_MODE = $OVN_GATEWAY_MODE"
+     echo "OVN_ENABLE_INTERCONNECT = $OVN_ENABLE_INTERCONNECT"
      echo "OVN_HYBRID_OVERLAY_ENABLE = $OVN_HYBRID_OVERLAY_ENABLE"
      echo "OVN_DISABLE_SNAT_MULTIPLE_GWS = $OVN_DISABLE_SNAT_MULTIPLE_GWS"
      echo "OVN_DISABLE_FORWARDING = $OVN_DISABLE_FORWARDING"
@@ -232,23 +242,23 @@ print_ovn_manifest_params() {
 }
 
 set_cluster_cidr_ip_families() {
-  if [ "$KIND_IPV4_SUPPORT" == true ] && [ "$KIND_IPV6_SUPPORT" == false ]; then
+  if [ "$PLATFORM_IPV4_SUPPORT" == true ] && [ "$PLATFORM_IPV6_SUPPORT" == false ]; then
     IP_FAMILY=""
     NET_CIDR=$NET_CIDR_IPV4
     SVC_CIDR=$SVC_CIDR_IPV4
     echo "IPv4 Only Support: API_IP=$API_IP --net-cidr=$NET_CIDR --svc-cidr=$SVC_CIDR"
-  elif [ "$KIND_IPV4_SUPPORT" == false ] && [ "$KIND_IPV6_SUPPORT" == true ]; then
+  elif [ "$PLATFORM_IPV4_SUPPORT" == false ] && [ "$PLATFORM_IPV6_SUPPORT" == true ]; then
     IP_FAMILY="ipv6"
     NET_CIDR=$NET_CIDR_IPV6
     SVC_CIDR=$SVC_CIDR_IPV6
     echo "IPv6 Only Support: API_IP=$API_IP --net-cidr=$NET_CIDR --svc-cidr=$SVC_CIDR"
-  elif [ "$KIND_IPV4_SUPPORT" == true ] && [ "$KIND_IPV6_SUPPORT" == true ]; then
+  elif [ "$PLATFORM_IPV4_SUPPORT" == true ] && [ "$PLATFORM_IPV6_SUPPORT" == true ]; then
     IP_FAMILY="dual"
     NET_CIDR=$NET_CIDR_IPV4,$NET_CIDR_IPV6
     SVC_CIDR=$SVC_CIDR_IPV4,$SVC_CIDR_IPV6
     echo "Dual Stack Support: API_IP=$API_IP --net-cidr=$NET_CIDR --svc-cidr=$SVC_CIDR"
   else
-    echo "Invalid setup. KIND_IPV4_SUPPORT and/or KIND_IPV6_SUPPORT must be true."
+    echo "Invalid setup. PLATFORM_IPV4_SUPPORT and/or PLATFORM_IPV6_SUPPORT must be true."
     exit 1
   fi
 }
@@ -281,48 +291,66 @@ run_kubectl apply -f rbac-ovnkube-db.yaml
 
 if [ "${OVN_ENABLE_OVNKUBE_IDENTITY}" == true ]; then
   run_kubectl apply -f ovnkube-identity.yaml
-  kubectl_wait_deployment ovnkube-identity
+  kubectl_wait_daemonset ovnkube-identity
 fi
 
+if [ "${OVN_ENABLE_OVNKUBE_IDENTITY}" == false ]; then
+  # install updated ovnkube-node daemonset
+  run_kubectl apply -f ovnkube-node.yaml
 
-# install updated ovnkube-node daemonset
-run_kubectl apply -f ovnkube-node.yaml
+  kubectl_wait_daemonset ovnkube-node
 
-kubectl_wait_daemonset ovnkube-node
+  run_kubectl get all -n ovn-kubernetes
+  CURRENT_REPLICAS_OVNKUBE_DB=$(run_kubectl get deploy -n ovn-kubernetes ovnkube-db -o=jsonpath='{.spec.replicas}')
+  run_kubectl scale deploy -n ovn-kubernetes ovnkube-db --replicas=0
 
-run_kubectl get all -n ovn-kubernetes
-CURRENT_REPLICAS_OVNKUBE_DB=$(run_kubectl get deploy -n ovn-kubernetes ovnkube-db -o=jsonpath='{.spec.replicas}')
-run_kubectl scale deploy -n ovn-kubernetes ovnkube-db --replicas=0
+  # install updated ovnkube-db daemonset
+  if [ "$OVN_HA" == true ]; then
+    run_kubectl apply -f ovnkube-db-raft.yaml
+  else
+    run_kubectl apply -f ovnkube-db.yaml
+  fi
 
-# install updated ovnkube-db daemonset
-if [ "$OVN_HA" == true ]; then
-  run_kubectl apply -f ovnkube-db-raft.yaml
+  run_kubectl scale deploy -n ovn-kubernetes ovnkube-db --replicas=$CURRENT_REPLICAS_OVNKUBE_DB
+  kubectl_wait_deployment ovnkube-db
+
+  CURRENT_REPLICAS_OVNKUBE_MASTER=$(run_kubectl get deploy -n ovn-kubernetes ovnkube-master -o=jsonpath='{.spec.replicas}')
+
+  # scaling down replica before changing image briefly helps get around an issue seen with KIND
+  # The issue was sometimes the KIND cluster won't scale down the ovnkube-master pod in time
+  # and the new pod with the new image would be stuck in "Pending" state
+  run_kubectl scale deploy -n ovn-kubernetes ovnkube-master --replicas=0
+
+  # install updated ovnkube-master deployment
+  run_kubectl apply -f ovnkube-master.yaml
+
+  popd
+
+  run_kubectl scale deploy -n ovn-kubernetes ovnkube-master --replicas=$CURRENT_REPLICAS_OVNKUBE_MASTER
+  kubectl_wait_deployment ovnkube-master
+  kubectl_wait_for_upgrade
+
+  run_kubectl describe ds ovnkube-node -n ovn-kubernetes
+
+  run_kubectl describe deployments.apps ovnkube-master -n ovn-kubernetes
+
 else
-  run_kubectl apply -f ovnkube-db.yaml
+  # we only support single node per zone IC upgrades.
+  run_kubectl apply -f ovnkube-single-node-zone.yaml
+  kubectl_wait_daemonset ovnkube-node
+
+  run_kubectl get all -n ovn-kubernetes
+  CURRENT_REPLICAS_OVNKUBE_CONTROL_PLANE=$(run_kubectl get deploy -n ovn-kubernetes ovnkube-control-plane -o=jsonpath='{.spec.replicas}')
+
+  run_kubectl scale deploy -n ovn-kubernetes ovnkube-control-plane --replicas=0
+
+  # install updated ovnkube-control-plane deployment
+  run_kubectl apply -f ovnkube-control-plane.yaml
+
+  run_kubectl scale deploy -n ovn-kubernetes ovnkube-control-plane --replicas=$CURRENT_REPLICAS_OVNKUBE_CONTROL_PLANE
+  kubectl_wait_deployment ovnkube-control-plane
+  kubectl_wait_for_upgrade
 fi
-
-run_kubectl scale deploy -n ovn-kubernetes ovnkube-db --replicas=$CURRENT_REPLICAS_OVNKUBE_DB
-kubectl_wait_deployment ovnkube-db
-
-CURRENT_REPLICAS_OVNKUBE_MASTER=$(run_kubectl get deploy -n ovn-kubernetes ovnkube-master -o=jsonpath='{.spec.replicas}')
-
-# scaling down replica before changing image briefly helps get around an issue seen with KIND
-# The issue was sometimes the KIND cluster won't scale down the ovnkube-master pod in time
-# and the new pod with the new image would be stuck in "Pending" state
-run_kubectl scale deploy -n ovn-kubernetes ovnkube-master --replicas=0
-
-# install updated ovnkube-master deployment
-run_kubectl apply -f ovnkube-master.yaml
-
-popd
-
-run_kubectl scale deploy -n ovn-kubernetes ovnkube-master --replicas=$CURRENT_REPLICAS_OVNKUBE_MASTER
-kubectl_wait_deployment ovnkube-master
-kubectl_wait_for_upgrade
-
-run_kubectl describe ds ovnkube-node -n ovn-kubernetes
-
-run_kubectl describe deployments.apps ovnkube-master -n ovn-kubernetes
 
 KIND_REMOVE_TAINT=${KIND_REMOVE_TAINT:-true}
 MASTER_NODES=$(kubectl get nodes -l node-role.kubernetes.io/control-plane -o name)
@@ -337,14 +365,14 @@ for node in $MASTER_NODES; do
 done
 
 # redownload the e2e test binaries if their version differs
-K8S_VERSION="v1.31.0"
+K8S_VERSION="v1.35.0"
 E2E_VERSION=$(/usr/local/bin/e2e.test --version)
 if [[ "$E2E_VERSION" != "$K8S_VERSION" ]]; then
    echo "found version $E2E_VERSION of e2e binary, need version $K8S_VERSION ; will download it."
    # Install e2e test binary and ginkgo
-   curl -L https://storage.googleapis.com/kubernetes-release/release/${K8S_VERSION}/kubernetes-test-linux-amd64.tar.gz -o kubernetes-test-linux-amd64.tar.gz
-   tar xvzf kubernetes-test-linux-amd64.tar.gz
+   curl -LO https://dl.k8s.io/${K8S_VERSION}/kubernetes-test-linux-${ARCH}.tar.gz
+   tar xvzf kubernetes-test-linux-${ARCH}.tar.gz
    sudo mv kubernetes/test/bin/e2e.test /usr/local/bin/e2e.test
    sudo mv kubernetes/test/bin/ginkgo /usr/local/bin/ginkgo
-   rm kubernetes-test-linux-amd64.tar.gz
+   rm kubernetes-test-linux-${ARCH}.tar.gz
 fi

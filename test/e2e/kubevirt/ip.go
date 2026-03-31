@@ -3,12 +3,13 @@ package kubevirt
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"time"
 
 	v1 "kubevirt.io/api/core/v1"
 )
 
-func RetrieveAllGlobalAddressesFromGuest(vmi *v1.VirtualMachineInstance) ([]string, error) {
+func RetrieveAllGlobalAddressesFromGuest(cli *Client, vmi *v1.VirtualMachineInstance) ([]string, error) {
 	ifaces := []struct {
 		Name      string `json:"ifname"`
 		Addresses []struct {
@@ -19,7 +20,7 @@ func RetrieveAllGlobalAddressesFromGuest(vmi *v1.VirtualMachineInstance) ([]stri
 		} `json:"addr_info"`
 	}{}
 
-	output, err := RunCommand(vmi, "ip -j a show", 2*time.Second)
+	output, err := cli.RunCommand(vmi, "ip -j a show", 2*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("failed retrieving adresses with ip command: %s: %w", output, err)
 	}
@@ -32,8 +33,11 @@ func RetrieveAllGlobalAddressesFromGuest(vmi *v1.VirtualMachineInstance) ([]stri
 			continue
 		}
 		for _, address := range iface.Addresses {
-			// Skip non DHCPv6 address
-			if address.Family == "inet6" && address.PrefixLen != 128 {
+			ip := net.ParseIP(address.Local)
+			if ip == nil {
+				return nil, fmt.Errorf("invalid ip address %q", address.Local)
+			}
+			if ip.IsLinkLocalUnicast() {
 				continue
 			}
 			addresses = append(addresses, address.Local)

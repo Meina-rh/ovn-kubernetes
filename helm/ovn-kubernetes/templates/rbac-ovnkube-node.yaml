@@ -29,15 +29,15 @@ subjects:
 
 # even when ovn_enable_ovnkube_identity is enabled, an ovnkube-node service account
 # is used in the ovnkube-node pod during initialization:
-# https://github.com/ovn-org/ovn-kubernetes/blob/c135b19e0b424c847e1de8bc214d884f8f905a8c/dist/images/ovnkube.sh#L2249
-# https://github.com/ovn-org/ovn-kubernetes/blob/c135b19e0b424c847e1de8bc214d884f8f905a8c/dist/images/ovnkube.sh#L748
+# https://github.com/ovn-kubernetes/ovn-kubernetes/blob/c135b19e0b424c847e1de8bc214d884f8f905a8c/dist/images/ovnkube.sh#L2249
+# https://github.com/ovn-kubernetes/ovn-kubernetes/blob/c135b19e0b424c847e1de8bc214d884f8f905a8c/dist/images/ovnkube.sh#L748
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-    name: ovnkube-node-status-reader
+    name: ovnkube-node-reader
 roleRef:
-    name: ovnkube-node-status-reader
+    name: ovnkube-node-reader
     kind: ClusterRole
     apiGroup: rbac.authorization.k8s.io
 subjects:
@@ -67,7 +67,7 @@ subjects:
     {{- end }}
 
 # In IC ovnkube-node pod needs configmap access in ovn-k ns for topology version:
-# https://github.com/ovn-org/ovn-kubernetes/blob/e1e7d40f9a6c6038b52696c1b8f8915a4d73160e/go-controller/pkg/ovn/topology_version.go#L28
+# https://github.com/ovn-kubernetes/ovn-kubernetes/blob/e1e7d40f9a6c6038b52696c1b8f8915a4d73160e/go-controller/pkg/ovn/topology_version.go#L28
 {{- if eq (hasKey .Values.global "enableInterconnect" | ternary .Values.global.enableInterconnect false) true }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -93,7 +93,7 @@ subjects:
 
 # even when ovn_enable_ovnkube_identity is enabled, an ovnkube-node service account
 # is used in the ovnkube-node pod during initialization:
-# https://github.com/ovn-org/ovn-kubernetes/blob/c135b19e0b424c847e1de8bc214d884f8f905a8c/dist/images/ovnkube.sh#L366
+# https://github.com/ovn-kubernetes/ovn-kubernetes/blob/c135b19e0b424c847e1de8bc214d884f8f905a8c/dist/images/ovnkube.sh#L366
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -114,12 +114,12 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-    name: ovnkube-node-status-reader
+    name: ovnkube-node-reader
 rules:
     - apiGroups: [""]
       resources:
-          - nodes/status
-      verbs: [ "get" ]
+          - nodes
+      verbs: [ "get", "list", "watch" ]
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -162,6 +162,7 @@ rules:
           - egressfirewalls/status
           - adminpolicybasedexternalroutes/status
           - egressqoses/status
+          - networkqoses/status
       verbs: [ "patch", "update" ]
     - apiGroups: ["policy.networking.k8s.io"]
       resources:
@@ -181,7 +182,17 @@ rules:
           - egressqoses
           - egressservices
           - adminpolicybasedexternalroutes
+          - userdefinednetworks
+          - clusteruserdefinednetworks
+          - networkqoses
+          - clusternetworkconnects
       verbs: [ "get", "list", "watch" ]
+    {{- if or (eq (hasKey .Values.global "enableRouteAdvertisements" | ternary .Values.global.enableRouteAdvertisements false) true) (eq (hasKey .Values.global "enableNoOverlayManagedRouting" | ternary .Values.global.enableNoOverlayManagedRouting false) true) }}
+    - apiGroups: ["k8s.ovn.org"]
+      resources:
+          - routeadvertisements
+      verbs: [ "get", "list", "watch" ]
+    {{- end }}
     {{- if eq (hasKey .Values.global "enableOvnKubeIdentity" | ternary .Values.global.enableOvnKubeIdentity true) true }}
     - apiGroups: ["certificates.k8s.io"]
       resources:
@@ -228,3 +239,39 @@ rules:
           {{- if eq (hasKey .Values.global "enableInterconnect" | ternary .Values.global.enableInterconnect false) true }}
           - create
           {{- end }}
+
+{{- $tags := (.Values.tags | default dict) }}
+{{- if (index $tags "ovnkube-node-dpu-host") }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+    name: ovnkube-node-dpu-leases
+    namespace: ovn-kubernetes
+roleRef:
+    name: ovnkube-node-dpu-leases
+    kind: Role
+    apiGroup: rbac.authorization.k8s.io
+subjects:
+    {{- if eq (hasKey .Values.global "enableOvnKubeIdentity" | ternary .Values.global.enableOvnKubeIdentity true) true }}
+    - kind: Group
+      name: system:ovn-nodes
+      apiGroup: rbac.authorization.k8s.io
+    {{- else }}
+    - kind: ServiceAccount
+      name: ovnkube-node
+      namespace: ovn-kubernetes
+    {{- end }}
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+    name: ovnkube-node-dpu-leases
+    namespace: ovn-kubernetes
+rules:
+    - apiGroups: ["coordination.k8s.io"]
+      resources:
+          - leases
+      verbs: [ "get", "create", "update" ]
+{{- end }}

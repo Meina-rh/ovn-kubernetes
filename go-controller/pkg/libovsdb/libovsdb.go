@@ -23,14 +23,14 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/klog/v2/textlogger"
 
-	"github.com/ovn-org/libovsdb/client"
-	"github.com/ovn-org/libovsdb/model"
+	"github.com/ovn-kubernetes/libovsdb/client"
+	"github.com/ovn-kubernetes/libovsdb/model"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/sbdb"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/vswitchd"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/sbdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/vswitchd"
 )
 
 func newClientLogger(dbModelName string) (logger logr.Logger, err error) {
@@ -140,10 +140,6 @@ func NewSBClientWithConfig(cfg config.OvnAuthConfig, promRegistry prometheus.Reg
 	enableMetricsOption := client.WithMetricsRegistryNamespaceSubsystem(promRegistry,
 		"ovnkube", "master_libovsdb")
 
-	dbModel.SetIndexes(map[string][]model.ClientIndex{
-		sbdb.EncapTable: {{Columns: []model.ColumnKey{{Column: "chassis_name"}}}},
-	})
-
 	c, err := newClient(cfg, dbModel, stopCh, enableMetricsOption)
 	if err != nil {
 		return nil, err
@@ -153,6 +149,7 @@ func NewSBClientWithConfig(cfg config.OvnAuthConfig, promRegistry prometheus.Reg
 	go func() {
 		<-stopCh
 		cancel()
+		c.Close()
 	}()
 
 	// Only Monitor Required SBDB tables to reduce memory overhead
@@ -177,6 +174,7 @@ func NewSBClientWithConfig(cfg config.OvnAuthConfig, promRegistry prometheus.Reg
 		),
 	)
 	if err != nil {
+		cancel()
 		c.Close()
 		return nil, err
 	}
@@ -218,10 +216,12 @@ func NewNBClientWithConfig(cfg config.OvnAuthConfig, promRegistry prometheus.Reg
 	go func() {
 		<-stopCh
 		cancel()
+		c.Close()
 	}()
 
 	_, err = c.MonitorAll(ctx)
 	if err != nil {
+		cancel()
 		c.Close()
 		return nil, err
 	}
@@ -233,7 +233,7 @@ func NewNBClientWithConfig(cfg config.OvnAuthConfig, promRegistry prometheus.Reg
 func NewOVSClient(stopCh <-chan struct{}) (client.Client, error) {
 	cfg := &config.OvnAuthConfig{
 		Scheme:  config.OvnDBSchemeUnix,
-		Address: "unix:/var/run/openvswitch/db.sock",
+		Address: fmt.Sprintf("unix:%s", filepath.Join(config.OvsPaths.RunDir, "db.sock")),
 	}
 
 	return NewOVSClientWithConfig(*cfg, stopCh)
@@ -252,6 +252,7 @@ func NewOVSClientWithConfig(cfg config.OvnAuthConfig, stopCh <-chan struct{}) (c
 	go func() {
 		<-stopCh
 		cancel()
+		c.Close()
 	}()
 
 	_, err = c.Monitor(ctx,
@@ -263,6 +264,7 @@ func NewOVSClientWithConfig(cfg config.OvnAuthConfig, stopCh <-chan struct{}) (c
 		),
 	)
 	if err != nil {
+		cancel()
 		c.Close()
 		return nil, err
 	}

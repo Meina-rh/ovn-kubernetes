@@ -9,15 +9,15 @@ import (
 	"k8s.io/klog/v2"
 	utilsnet "k8s.io/utils/net"
 
-	libovsdbclient "github.com/ovn-org/libovsdb/client"
-	"github.com/ovn-org/libovsdb/ovsdb"
+	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
+	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
-	ovntypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util/batching"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	ovntypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util/batching"
 )
 
 type LRPSyncer struct {
@@ -101,7 +101,8 @@ func (syncer *LRPSyncer) syncEgressIPReRoutes() error {
 			podInfo, err := cache.getPod(podIP)
 			if err != nil {
 				klog.Infof("Failed to find Logical Switch Port cache entry for pod IP %s: %v", podIP.String(), err)
-				continue
+				// pod not found, add dummy metadata that will be cleaned up by EIP controller sync.
+				podInfo = podNetInfo{namespace: "UNKNOWN", name: "UNKNOWN"}
 			}
 			ipFamily := getIPFamily(isIPv6)
 			lrp.ExternalIDs = getEgressIPLRPReRouteDbIDs(eipName, podInfo.namespace, podInfo.name, ipFamily, defaultNetworkName, syncer.controllerName).GetExternalIDs()
@@ -138,7 +139,7 @@ func (ps podsNetInfo) getPod(ip net.IP) (podNetInfo, error) {
 
 func (syncer *LRPSyncer) buildCDNPodCache() (podsNetInfo, podsNetInfo, error) {
 	p := func(item *nbdb.LogicalSwitchPort) bool {
-		return item.ExternalIDs["pod"] == "true" && item.ExternalIDs[ovntypes.NADExternalID] == "" // ignore secondary network LSPs
+		return item.ExternalIDs["pod"] == "true" && item.ExternalIDs[ovntypes.NADExternalID] == "" // ignore UDN LSPs
 	}
 	lsps, err := libovsdbops.FindLogicalSwitchPortWithPredicate(syncer.nbClient, p)
 	if err != nil {

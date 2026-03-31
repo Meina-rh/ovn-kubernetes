@@ -4,25 +4,32 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
 
+	cnitypes "github.com/containernetworking/cni/pkg/types"
 	"github.com/gorilla/mux"
+	nadv1Listers "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/listers/k8s.cni.cncf.io/v1"
 
 	"k8s.io/client-go/kubernetes"
 	corev1listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/klog/v2"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/metrics"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/networkmanager"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/libovsdb/client"
+
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/metrics"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/networkmanager"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
+
+const kubeletDefaultCRIOperationTimeout = 2 * time.Minute
 
 // *** The Server is PRIVATE API between OVN components and may be
 // changed at any time.  It is in no way a supported interface or API. ***
@@ -54,18 +61,26 @@ func NewCNIServer(
 	factory factory.NodeWatchFactory,
 	kclient kubernetes.Interface,
 	networkManager networkmanager.Interface,
+	ovsClient client.Client,
+	dpuHealth DPUStatusProvider,
 ) (*Server, error) {
+	var nadLister nadv1Listers.NetworkAttachmentDefinitionLister
+
 	if config.OvnKubeNode.Mode == types.NodeModeDPU {
 		return nil, fmt.Errorf("unsupported ovnkube-node mode for CNI server: %s", config.OvnKubeNode.Mode)
 	}
 
 	router := mux.NewRouter()
 
+	if util.IsNetworkSegmentationSupportEnabled() {
+		nadLister = factory.NADInformer().Lister()
+	}
 	s := &Server{
 		Server: http.Server{
 			Handler: router,
 		},
 		clientSet: &ClientSet{
+			nadLister: nadLister,
 			podLister: corev1listers.NewPodLister(factory.LocalPodInformer().GetIndexer()),
 			kclient:   kclient,
 		},
@@ -77,6 +92,8 @@ func NewCNIServer(
 		},
 		handlePodRequestFunc: HandlePodRequest,
 		networkManager:       networkManager,
+		ovsClient:            ovsClient,
+		dpuHealth:            dpuHealth,
 	}
 
 	if len(config.Kubernetes.CAData) > 0 {
@@ -88,6 +105,15 @@ func NewCNIServer(
 	router.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		result, err := s.handleCNIRequest(r)
 		if err != nil {
+			var cniErr *cnitypes.Error
+			if errors.As(err, &cniErr) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				if encodeErr := json.NewEncoder(w).Encode(cniErr); encodeErr != nil {
+					klog.Warningf("Failed to write CNI error response: %v", encodeErr)
+				}
+				return
+			}
 			http.Error(w, fmt.Sprintf("%v", err), http.StatusBadRequest)
 			return
 		}
@@ -130,7 +156,22 @@ func cniRequestToPodRequest(cr *Request) (*PodRequest, error) {
 	}
 
 	req := &PodRequest{
-		Command: command(cmd),
+		Command:   command(cmd),
+		timestamp: time.Now(),
+	}
+
+	conf, err := config.ReadCNIConfig(cr.Config)
+	if err != nil {
+		return nil, fmt.Errorf("broken stdin args")
+	}
+	req.CNIConf = conf
+	req.deviceInfo = cr.DeviceInfo
+
+	// STATUS requests do not carry pod-specific context. Return early after validating config.
+	if req.Command == CNIStatus {
+		// Match the Kubelet default CRI operation timeout of 2m.
+		req.ctx, req.cancel = context.WithTimeout(context.Background(), kubeletDefaultCRIOperationTimeout)
+		return req, nil
 	}
 
 	req.SandboxID, ok = cr.Env["CNI_CONTAINERID"]
@@ -171,11 +212,6 @@ func cniRequestToPodRequest(cr *Request) (*PodRequest, error) {
 	// containerd 1.5: https://github.com/containerd/containerd/pull/5643
 	req.PodUID = cniArgs["K8S_POD_UID"]
 
-	conf, err := config.ReadCNIConfig(cr.Config)
-	if err != nil {
-		return nil, fmt.Errorf("broken stdin args")
-	}
-
 	// the first network to the Pod is always named as `default`,
 	// capture the effective NAD Name here
 	req.netName = conf.Name
@@ -200,11 +236,8 @@ func cniRequestToPodRequest(cr *Request) (*PodRequest, error) {
 		}
 	}
 
-	req.CNIConf = conf
-	req.deviceInfo = cr.DeviceInfo
-	req.timestamp = time.Now()
-	// Match the Kubelet default CRI operation timeout of 2m
-	req.ctx, req.cancel = context.WithTimeout(context.Background(), 2*time.Minute)
+	// Match the Kubelet default CRI operation timeout of 2m.
+	req.ctx, req.cancel = context.WithTimeout(context.Background(), kubeletDefaultCRIOperationTimeout)
 	return req, nil
 }
 
@@ -222,10 +255,18 @@ func (s *Server) handleCNIRequest(r *http.Request) ([]byte, error) {
 	}
 	defer req.cancel()
 
-	result, err := s.handlePodRequestFunc(req, s.clientSet, s.kubeAuth, s.networkManager)
+	if err := s.checkDPUHealth(req); err != nil {
+		return nil, err
+	}
+
+	result, err := s.handlePodRequestFunc(req, s.clientSet, s.kubeAuth, s.networkManager, s.ovsClient)
 	if err != nil {
 		// Prefix error with request information for easier debugging
-		return nil, fmt.Errorf("%s %v", req, err)
+		var cniErr *cnitypes.Error
+		if !errors.As(err, &cniErr) {
+			err = fmt.Errorf("%s %w", req, err)
+		}
+		return nil, err
 	}
 	return result, nil
 }
@@ -246,4 +287,28 @@ func (s *Server) handleCNIMetrics(w http.ResponseWriter, r *http.Request) {
 	if _, err := w.Write([]byte{}); err != nil {
 		klog.Warningf("Error writing %s HTTP response for metrics post", err)
 	}
+}
+
+func (s *Server) checkDPUHealth(req *PodRequest) error {
+	if s.dpuHealth == nil || config.OvnKubeNode.Mode != types.NodeModeDPUHost {
+		return nil
+	}
+
+	if req.Command != CNIAdd && req.Command != CNIStatus {
+		return nil
+	}
+
+	ready, reason := s.dpuHealth.Ready()
+	if ready {
+		return nil
+	}
+
+	msg := dpuNotReadyMsg
+	if reason != "" {
+		msg = fmt.Sprintf("%s: %s", msg, reason)
+	}
+	if req.Command == CNIStatus {
+		return &cnitypes.Error{Code: 50, Msg: msg}
+	}
+	return fmt.Errorf("%s", msg)
 }

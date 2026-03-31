@@ -1,6 +1,6 @@
 # OKEP-4368: OKEP Template
 
-* Issue: [#4368](https://github.com/ovn-org/ovn-kubernetes/issues/4368)
+* Issue: [#4368](https://github.com/ovn-kubernetes/ovn-kubernetes/issues/4368)
 (Every OKEP must have an associated enhancement tracking issue that is
 added to the ovn-kubernetes repo, so please open one if you don't have one
 yet. Then use the Issue number xxxx as the unique number for the OKEP-xxxx
@@ -89,16 +89,22 @@ proposal; go as deep as possible; use diagrams wherever it makes sense)
 * New proposed additions to ovn-kubernetes.io for end users
 to get started with this feature
 * when you open an OKEP PR; you must also edit
-https://github.com/ovn-org/ovn-kubernetes/blob/13c333afc21e89aec3cfcaa89260f72383497707/mkdocs.yml#L135
+https://github.com/ovn-kubernetes/ovn-kubernetes/blob/13c333afc21e89aec3cfcaa89260f72383497707/mkdocs.yml#L135
 to include the path to your new OKEP (i.e Feature Title: okeps/<filename.md>)
 
 ## Risks, Known Limitations and Mitigations
 
-## OVN Kubernetes Version Skew
+## OVN-Kubernetes Version Skew
 
 which version is this feature planned to be introduced in?
 check repo milestones/releases to get this information for
 when the next release is planned for
+
+## Backwards Compatibility
+
+(Describe any backwards compatibility considerations for this feature.
+This should include any changes to the API, datapath, or other components
+that may be backwards incompatible.)
 
 ## Alternatives
 

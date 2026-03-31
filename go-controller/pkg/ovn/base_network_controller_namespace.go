@@ -13,14 +13,14 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kubevirt"
-	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
-	libovsdbutil "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/util"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
-	addressset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/address_set"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
-	utilerrors "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util/errors"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/kubevirt"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	libovsdbutil "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	addressset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/address_set"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
+	utilerrors "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util/errors"
 )
 
 // namespaceInfo contains information related to a Namespace. Use oc.getNamespaceLocked()
@@ -75,7 +75,7 @@ func (bnc *BaseNetworkController) shouldWatchNamespaces() bool {
 	// - The network is secondary, and multi NetworkPolicies are enabled.
 	return bnc.IsDefault() ||
 		bnc.IsPrimaryNetwork() && util.IsNetworkSegmentationSupportEnabled() ||
-		bnc.IsSecondary() && util.IsMultiNetworkPoliciesSupportEnabled()
+		bnc.IsUserDefinedNetwork() && util.IsMultiNetworkPoliciesSupportEnabled()
 }
 
 // WatchNamespaces starts the watching of namespace resource and calls
@@ -176,7 +176,6 @@ func (bnc *BaseNetworkController) syncNamespaces(namespaces []interface{}) error
 		func(dbIDs *libovsdbops.DbObjectIDs) error {
 			if !expectedNs[dbIDs.GetObjectID(libovsdbops.ObjectNameKey)] {
 				if err := bnc.addressSetFactory.DestroyAddressSet(dbIDs); err != nil {
-					klog.Errorf(err.Error())
 					return err
 				}
 			}
@@ -397,6 +396,7 @@ func (bnc *BaseNetworkController) getAllNamespacePodAddresses(ns string) []net.I
 	}
 
 	var ips []net.IP
+	resolver := bnc.getNetworkNameForNADKeyFunc()
 	// Get all the pods in the namespace and append their IP to the address_set
 	existingPods, err := bnc.watchFactory.GetPods(ns)
 	if err != nil {
@@ -405,9 +405,9 @@ func (bnc *BaseNetworkController) getAllNamespacePodAddresses(ns string) []net.I
 		ips = make([]net.IP, 0, len(existingPods))
 		for _, pod := range existingPods {
 			if !util.PodWantsHostNetwork(pod) && !util.PodCompleted(pod) && util.PodScheduled(pod) {
-				podIPs, err := util.GetPodIPsOfNetwork(pod, bnc.GetNetInfo())
+				podIPs, err := util.GetPodIPsOfNetwork(pod, bnc.GetNetInfo(), resolver)
 				if err != nil {
-					klog.Warningf(err.Error())
+					klog.Warningf("Failed to get IPs for pod %s/%s: %v", pod.Namespace, pod.Name, err)
 					continue
 				}
 				ips = append(ips, podIPs...)
@@ -449,7 +449,7 @@ func (bnc *BaseNetworkController) getNamespacePortGroupName(namespace string) st
 // failure indicates it should be retried later.
 func (bsnc *BaseNetworkController) removeRemoteZonePodFromNamespaceAddressSet(pod *corev1.Pod) error {
 	podDesc := fmt.Sprintf("pod %s/%s/%s", bsnc.GetNetworkName(), pod.Namespace, pod.Name)
-	podIfAddrs, err := util.GetPodCIDRsWithFullMask(pod, bsnc.GetNetInfo())
+	podIfAddrs, err := util.GetPodCIDRsWithFullMask(pod, bsnc.GetNetInfo(), bsnc.getNetworkNameForNADKeyFunc())
 	if err != nil {
 		// maybe the pod is not scheduled yet or addLSP has not happened yet, so it doesn't have IPs.
 		// let us ignore deletion failures for podIPs not found because
@@ -467,7 +467,7 @@ func (bsnc *BaseNetworkController) removeRemoteZonePodFromNamespaceAddressSet(po
 	// tracked within the zone, nodeName will be empty which will force
 	// canReleasePodIPs to lookup all nodes.
 	nodeName := pod.Spec.NodeName
-	if !bsnc.IsSecondary() && kubevirt.IsPodLiveMigratable(pod) {
+	if !bsnc.IsUserDefinedNetwork() && kubevirt.IsPodLiveMigratable(pod) {
 		nodeName, _ = bsnc.lsManager.GetSubnetName(podIfAddrs)
 	}
 

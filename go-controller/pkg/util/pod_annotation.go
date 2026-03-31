@@ -12,13 +12,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	listers "k8s.io/client-go/listers/core/v1"
-	"k8s.io/client-go/tools/cache"
 	utilnet "k8s.io/utils/net"
 	"sigs.k8s.io/yaml"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/kube"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
 )
 
 // This handles the "k8s.ovn.org/pod-networks" annotation on Pods, used to pass
@@ -53,13 +51,15 @@ import (
 const (
 	// OvnPodAnnotationName is the constant string representing the POD annotation key
 	OvnPodAnnotationName = "k8s.ovn.org/pod-networks"
-	// DefNetworkAnnotation is the pod annotation for the cluster-wide default network
+	// DefNetworkAnnotation is the pod annotation for the cluster-wide active network
 	DefNetworkAnnotation = "v1.multus-cni.io/default-network"
-	// OvnUDNIPAMClaimName is used for workload owners to instruct OVN-K which
-	// IPAMClaim will hold the allocation for the workload
-	OvnUDNIPAMClaimName = "k8s.ovn.org/primary-udn-ipamclaim"
 	// UDNOpenPortsAnnotationName is the pod annotation to open default network pods on UDN pods.
 	UDNOpenPortsAnnotationName = "k8s.ovn.org/open-default-ports"
+
+	// DeprecatedOvnUDNIPAMClaimName is used for workload owners to instruct OVN-K which
+	// IPAMClaim will hold the allocation for the workload.
+	// Deprecated: Use 'v1.multus-cni.io/default-network' annotation instead, specifying the 'ipam-claim-reference' attribute.
+	DeprecatedOvnUDNIPAMClaimName = "k8s.ovn.org/primary-udn-ipamclaim"
 )
 
 var ErrNoPodIPFound = errors.New("no pod IPs found")
@@ -75,6 +75,12 @@ type PodAnnotation struct {
 	// Gateways are the pod's gateway IP addresses; note that there may be
 	// fewer Gateways than IPs.
 	Gateways []net.IP
+
+	// GatewayIPv6LLA is the IPv6 Link Local Address for the pod's gateway, that is the address
+	// that will be set as gateway with router advertisements
+	// generated from the gateway router from the node where the pod is running.
+	GatewayIPv6LLA net.IP
+
 	// Routes are additional routes to add to the pod's network namespace
 	Routes []PodRoute
 
@@ -117,8 +123,9 @@ type podAnnotation struct {
 	Gateways []string   `json:"gateway_ips,omitempty"`
 	Routes   []podRoute `json:"routes,omitempty"`
 
-	IP      string `json:"ip_address,omitempty"`
-	Gateway string `json:"gateway_ip,omitempty"`
+	IP             string `json:"ip_address,omitempty"`
+	Gateway        string `json:"gateway_ip,omitempty"`
+	GatewayIPv6LLA string `json:"ipv6_lla_gateway_ip,omitempty"`
 
 	TunnelID int    `json:"tunnel_id,omitempty"`
 	Role     string `json:"role,omitempty"`
@@ -137,7 +144,7 @@ type OpenPort struct {
 }
 
 // MarshalPodAnnotation adds the pod's network details of the specified network to the corresponding pod annotation.
-func MarshalPodAnnotation(annotations map[string]string, podInfo *PodAnnotation, nadName string) (map[string]string, error) {
+func MarshalPodAnnotation(annotations map[string]string, podInfo *PodAnnotation, nadKey string) (map[string]string, error) {
 	if annotations == nil {
 		annotations = make(map[string]string)
 	}
@@ -163,7 +170,7 @@ func MarshalPodAnnotation(annotations map[string]string, podInfo *PodAnnotation,
 		pa.IPs = append(pa.IPs, ip.String())
 	}
 
-	existingPa, ok := podNetworks[nadName]
+	existingPa, ok := podNetworks[nadKey]
 	if ok {
 		if len(pa.IPs) != len(existingPa.IPs) {
 			return nil, ErrOverridePodIPs
@@ -192,7 +199,12 @@ func MarshalPodAnnotation(annotations map[string]string, podInfo *PodAnnotation,
 			NextHop: nh,
 		})
 	}
-	podNetworks[nadName] = pa
+
+	if podInfo.GatewayIPv6LLA != nil {
+		pa.GatewayIPv6LLA = podInfo.GatewayIPv6LLA.String()
+	}
+
+	podNetworks[nadKey] = pa
 	bytes, err := json.Marshal(podNetworks)
 	if err != nil {
 		return nil, fmt.Errorf("failed marshaling podNetworks map %v", podNetworks)
@@ -202,7 +214,7 @@ func MarshalPodAnnotation(annotations map[string]string, podInfo *PodAnnotation,
 }
 
 // UnmarshalPodAnnotation returns the Pod's network info of the given network from pod.Annotations
-func UnmarshalPodAnnotation(annotations map[string]string, nadName string) (*PodAnnotation, error) {
+func UnmarshalPodAnnotation(annotations map[string]string, nadKey string) (*PodAnnotation, error) {
 	var err error
 	ovnAnnotation, ok := annotations[OvnPodAnnotationName]
 	if !ok {
@@ -214,10 +226,10 @@ func UnmarshalPodAnnotation(annotations map[string]string, nadName string) (*Pod
 		return nil, err
 	}
 
-	tempA, ok := podNetworks[nadName]
+	tempA, ok := podNetworks[nadKey]
 	if !ok {
-		return nil, fmt.Errorf("no ovn pod annotation for network %s: %q",
-			nadName, ovnAnnotation)
+		return nil, newAnnotationNotSetError("no ovn pod annotation for NAD key %s: %q",
+			nadKey, ovnAnnotation)
 	}
 
 	a := &tempA
@@ -282,6 +294,14 @@ func UnmarshalPodAnnotation(annotations map[string]string, nadName string) (*Pod
 		podAnnotation.Routes = append(podAnnotation.Routes, route)
 	}
 
+	if a.GatewayIPv6LLA != "" {
+		llaGW := net.ParseIP(a.GatewayIPv6LLA)
+		if !isIPv6LLA(llaGW) {
+			return nil, fmt.Errorf("failed to parse pod ipv6 lla gateway, or non ipv6 lla %q", a.GatewayIPv6LLA)
+		}
+		podAnnotation.GatewayIPv6LLA = llaGW
+	}
+
 	return podAnnotation, nil
 }
 
@@ -297,10 +317,10 @@ func UnmarshalPodAnnotationAllNetworks(annotations map[string]string) (map[strin
 	return podNetworks, nil
 }
 
-// GetPodCIDRsWithFullMask returns the pod's IP addresses in a CIDR with FullMask format
-// Internally it calls GetPodIPsOfNetwork
-func GetPodCIDRsWithFullMask(pod *corev1.Pod, nInfo NetInfo) ([]*net.IPNet, error) {
-	podIPs, err := GetPodIPsOfNetwork(pod, nInfo)
+// GetPodCIDRsWithFullMask returns the pod's IP addresses in a CIDR with FullMask format.
+// Internally it calls GetPodIPsOfNetwork.
+func GetPodCIDRsWithFullMask(pod *corev1.Pod, nInfo NetInfo, getNetworkNameForNADKey func(nadKey string) string) ([]*net.IPNet, error) {
+	podIPs, err := GetPodIPsOfNetwork(pod, nInfo, getNetworkNameForNADKey)
 	if err != nil {
 		return nil, err
 	}
@@ -318,17 +338,21 @@ func GetPodCIDRsWithFullMask(pod *corev1.Pod, nInfo NetInfo) ([]*net.IPNet, erro
 // GetPodIPsOfNetwork returns the pod's IP addresses, first from the OVN annotation
 // and then falling back to the Pod Status IPs. This function is intended to
 // also return IPs for HostNetwork and other non-OVN-IPAM-ed pods.
-func GetPodIPsOfNetwork(pod *corev1.Pod, nInfo NetInfo) ([]net.IP, error) {
-	if nInfo.IsSecondary() {
-		return SecondaryNetworkPodIPs(pod, nInfo)
+// getNetworkNameForNADKey is required for user defined networks.
+func GetPodIPsOfNetwork(pod *corev1.Pod, nInfo NetInfo, getNetworkNameForNADKey func(nadKey string) string) ([]net.IP, error) {
+	if nInfo.IsUserDefinedNetwork() {
+		if getNetworkNameForNADKey == nil {
+			return nil, fmt.Errorf("missing NAD resolver for network %q", nInfo.GetNetworkName())
+		}
+		return SecondaryNetworkPodIPs(pod, nInfo, getNetworkNameForNADKey)
 	}
 	return DefaultNetworkPodIPs(pod)
 }
 
 // GetPodCIDRsWithFullMaskOfNetwork returns the pod's IP addresses in a CIDR with FullMask format
 // from a pod network annotation 'k8s.ovn.org/pod-networks' using key nadName.
-func GetPodCIDRsWithFullMaskOfNetwork(pod *corev1.Pod, nadName string) []*net.IPNet {
-	ips := getAnnotatedPodIPs(pod, nadName)
+func GetPodCIDRsWithFullMaskOfNetwork(pod *corev1.Pod, nadKey string) []*net.IPNet {
+	ips := getAnnotatedPodIPs(pod, nadKey)
 	ipNets := make([]*net.IPNet, 0, len(ips))
 	for _, ip := range ips {
 		ipNet := net.IPNet{
@@ -371,57 +395,62 @@ func DefaultNetworkPodIPs(pod *corev1.Pod) ([]net.IP, error) {
 	return []net.IP{ip}, nil
 }
 
-func SecondaryNetworkPodIPs(pod *corev1.Pod, networkInfo NetInfo) ([]net.IP, error) {
+func SecondaryNetworkPodIPs(pod *corev1.Pod, networkInfo NetInfo, getNetworkNameForNADKey func(nadKey string) string) ([]net.IP, error) {
 	ips := []net.IP{}
-	podNadNames, err := PodNadNames(pod, networkInfo)
+	if getNetworkNameForNADKey == nil {
+		return nil, fmt.Errorf("missing NAD resolver for network %q", networkInfo.GetNetworkName())
+	}
+	podNADKeys, err := PodNADKeys(pod, networkInfo, getNetworkNameForNADKey)
 	if err != nil {
 		return nil, err
 	}
-	for _, nadName := range podNadNames {
-		ips = append(ips, getAnnotatedPodIPs(pod, nadName)...)
+	for _, nadKey := range podNADKeys {
+		ips = append(ips, getAnnotatedPodIPs(pod, nadKey)...)
 	}
 	return ips, nil
 }
 
-// PodNadNames returns pod's NAD names associated with given network specified by netconf.
-// If netinfo belongs to user defined primary network, then retrieve NAD names from
-// netinfo.GetNADs() which is serving pod's namespace.
-// For all other cases, retrieve NAD names for the pod based on NetworkSelectionElement.
-func PodNadNames(pod *corev1.Pod, netinfo NetInfo) ([]string, error) {
-	if netinfo.IsPrimaryNetwork() {
-		return GetPrimaryNetworkNADNamesForNamespaceFromNetInfo(pod.Namespace, netinfo)
+// PodNADKeys returns pod's NAD keys associated with given network specified by netconf.
+// For primary UDNs, retrieve NAD names for the pod based on its OVN annotations.
+// For secondary UDNs, retrieve NAD names for the pod based on NetworkSelectionElement.
+func PodNADKeys(pod *corev1.Pod, netinfo NetInfo, getNetworkNameForNADKey func(nadKey string) string) ([]string, error) {
+	if netinfo.IsUserDefinedNetwork() && getNetworkNameForNADKey == nil {
+		return nil, fmt.Errorf("missing NAD resolver for network %q", netinfo.GetNetworkName())
 	}
-	on, networkMap, err := GetPodNADToNetworkMapping(pod, netinfo)
+
+	if netinfo.IsPrimaryNetwork() {
+		podNetworks, err := UnmarshalPodAnnotationAllNetworks(pod.Annotations)
+		if err != nil {
+			return nil, err
+		}
+		nadKeys := make([]string, 0, len(podNetworks))
+		for nadKey := range podNetworks {
+			networkName := getNetworkNameForNADKey(nadKey)
+			if networkName == "" || networkName != netinfo.GetNetworkName() {
+				continue
+			}
+			nadKeys = append(nadKeys, nadKey)
+		}
+		return nadKeys, nil
+	}
+
+	on, networkMap, err := getPodNADToNetworkMapping(pod, netinfo, getNetworkNameForNADKey)
 	// skip pods that are not on this network
 	if err != nil {
 		return nil, err
 	} else if !on {
 		return []string{}, nil
 	}
-	nadNames := make([]string, 0, len(networkMap))
-	for nadName := range networkMap {
-		nadNames = append(nadNames, nadName)
+	nadKeys := make([]string, 0, len(networkMap))
+	for nadKey := range networkMap {
+		nadKeys = append(nadKeys, nadKey)
 	}
-	return nadNames, nil
+	return nadKeys, nil
 }
 
-func GetPrimaryNetworkNADNamesForNamespaceFromNetInfo(namespace string, netinfo NetInfo) ([]string, error) {
-	for _, nadName := range netinfo.GetNADs() {
-		ns, _, err := cache.SplitMetaNamespaceKey(nadName)
-		if err != nil {
-			return nil, fmt.Errorf("error parsing nad name %s from network %s: %v", nadName, netinfo.GetNetworkName(), err)
-		}
-		if ns != namespace {
-			continue
-		}
-		return []string{nadName}, nil
-	}
-	return []string{}, nil
-}
-
-func getAnnotatedPodIPs(pod *corev1.Pod, nadName string) []net.IP {
+func getAnnotatedPodIPs(pod *corev1.Pod, nadKey string) []net.IP {
 	var ips []net.IP
-	annotation, _ := UnmarshalPodAnnotation(pod.Annotations, nadName)
+	annotation, _ := UnmarshalPodAnnotation(pod.Annotations, nadKey)
 	if annotation != nil {
 		// Use the OVN annotation if valid
 		for _, ip := range annotation.IPs {
@@ -469,10 +498,10 @@ func GetK8sPodAllNetworkSelections(pod *corev1.Pod) ([]*nadapi.NetworkSelectionE
 
 // UpdatePodAnnotationWithRetry updates the pod annotation on the pod retrying
 // on conflict
-func UpdatePodAnnotationWithRetry(podLister listers.PodLister, kube kube.Interface, pod *corev1.Pod, podAnnotation *PodAnnotation, nadName string) error {
+func UpdatePodAnnotationWithRetry(podLister listers.PodLister, kube kube.Interface, pod *corev1.Pod, podAnnotation *PodAnnotation, nadKey string) error {
 	updatePodAnnotationNoRollback := func(pod *corev1.Pod) (*corev1.Pod, func(), error) {
 		var err error
-		pod.Annotations, err = MarshalPodAnnotation(pod.Annotations, podAnnotation, nadName)
+		pod.Annotations, err = MarshalPodAnnotation(pod.Annotations, podAnnotation, nadKey)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -492,176 +521,6 @@ func UpdatePodAnnotationWithRetry(podLister listers.PodLister, kube kube.Interfa
 // pod.
 func IsValidPodAnnotation(podAnnotation *PodAnnotation) bool {
 	return podAnnotation != nil && len(podAnnotation.MAC) > 0
-}
-
-func joinSubnetToRoute(netinfo NetInfo, isIPv6 bool, gatewayIP net.IP) PodRoute {
-	joinSubnet := netinfo.JoinSubnetV4()
-	if isIPv6 {
-		joinSubnet = netinfo.JoinSubnetV6()
-	}
-	return PodRoute{
-		Dest:    joinSubnet,
-		NextHop: gatewayIP,
-	}
-}
-
-func serviceCIDRToRoute(isIPv6 bool, gatewayIP net.IP) []PodRoute {
-	var podRoutes []PodRoute
-	for _, serviceSubnet := range config.Kubernetes.ServiceCIDRs {
-		if isIPv6 == utilnet.IsIPv6CIDR(serviceSubnet) {
-			podRoutes = append(podRoutes, PodRoute{
-				Dest:    serviceSubnet,
-				NextHop: gatewayIP,
-			})
-		}
-	}
-	return podRoutes
-}
-
-func hairpinMasqueradeIPToRoute(isIPv6 bool, gatewayIP net.IP) PodRoute {
-	ip := config.Gateway.MasqueradeIPs.V4OVNServiceHairpinMasqueradeIP
-	if isIPv6 {
-		ip = config.Gateway.MasqueradeIPs.V6OVNServiceHairpinMasqueradeIP
-	}
-	return PodRoute{
-		Dest: &net.IPNet{
-			IP:   ip,
-			Mask: GetIPFullMask(ip),
-		},
-		NextHop: gatewayIP,
-	}
-}
-
-// addRoutesGatewayIP updates the provided pod annotation for the provided pod
-// with the gateways derived from the allocated IPs
-func AddRoutesGatewayIP(
-	netinfo NetInfo,
-	pod *corev1.Pod,
-	podAnnotation *PodAnnotation,
-	network *nadapi.NetworkSelectionElement) error {
-
-	// generate the nodeSubnets from the allocated IPs
-	nodeSubnets := IPsToNetworkIPs(podAnnotation.IPs...)
-
-	if netinfo.IsSecondary() {
-		// for secondary network, see if its network-attachment's annotation has default-route key.
-		// If present, then we need to add default route for it
-		podAnnotation.Gateways = append(podAnnotation.Gateways, network.GatewayRequest...)
-		topoType := netinfo.TopologyType()
-		switch topoType {
-		case types.LocalnetTopology:
-			// no route needed for directly connected subnets
-			return nil
-		case types.Layer2Topology:
-			if !IsNetworkSegmentationSupportEnabled() || !netinfo.IsPrimaryNetwork() {
-				return nil
-			}
-			for _, podIfAddr := range podAnnotation.IPs {
-				isIPv6 := utilnet.IsIPv6CIDR(podIfAddr)
-				nodeSubnet, err := MatchFirstIPNetFamily(isIPv6, nodeSubnets)
-				if err != nil {
-					return err
-				}
-				gatewayIPnet := GetNodeGatewayIfAddr(nodeSubnet)
-				// Ensure default service network traffic always goes to OVN
-				podAnnotation.Routes = append(podAnnotation.Routes, serviceCIDRToRoute(isIPv6, gatewayIPnet.IP)...)
-				// Ensure UDN join subnet traffic always goes to UDN LSP
-				podAnnotation.Routes = append(podAnnotation.Routes, joinSubnetToRoute(netinfo, isIPv6, gatewayIPnet.IP))
-				if network != nil && len(network.GatewayRequest) == 0 { // if specific default route for pod was not requested then add gatewayIP
-					podAnnotation.Gateways = append(podAnnotation.Gateways, gatewayIPnet.IP)
-				}
-			}
-			return nil
-		case types.Layer3Topology:
-			for _, podIfAddr := range podAnnotation.IPs {
-				isIPv6 := utilnet.IsIPv6CIDR(podIfAddr)
-				nodeSubnet, err := MatchFirstIPNetFamily(isIPv6, nodeSubnets)
-				if err != nil {
-					return err
-				}
-				gatewayIPnet := GetNodeGatewayIfAddr(nodeSubnet)
-				for _, clusterSubnet := range netinfo.Subnets() {
-					if isIPv6 == utilnet.IsIPv6CIDR(clusterSubnet.CIDR) {
-						podAnnotation.Routes = append(podAnnotation.Routes, PodRoute{
-							Dest:    clusterSubnet.CIDR,
-							NextHop: gatewayIPnet.IP,
-						})
-					}
-				}
-				if !IsNetworkSegmentationSupportEnabled() || !netinfo.IsPrimaryNetwork() {
-					continue
-				}
-				// Ensure default service network traffic always goes to OVN
-				podAnnotation.Routes = append(podAnnotation.Routes, serviceCIDRToRoute(isIPv6, gatewayIPnet.IP)...)
-				// Ensure UDN join subnet traffic always goes to UDN LSP
-				podAnnotation.Routes = append(podAnnotation.Routes, joinSubnetToRoute(netinfo, isIPv6, gatewayIPnet.IP))
-				if network != nil && len(network.GatewayRequest) == 0 { // if specific default route for pod was not requested then add gatewayIP
-					podAnnotation.Gateways = append(podAnnotation.Gateways, gatewayIPnet.IP)
-				}
-			}
-			return nil
-		}
-		return fmt.Errorf("topology type %s not supported", topoType)
-	}
-
-	// if there are other network attachments for the pod, then check if those network-attachment's
-	// annotation has default-route key. If present, then we need to skip adding default route for
-	// OVN interface
-	networks, err := GetK8sPodAllNetworkSelections(pod)
-	if err != nil {
-		return fmt.Errorf("error while getting network attachment definition for [%s/%s]: %v",
-			pod.Namespace, pod.Name, err)
-	}
-	otherDefaultRouteV4 := false
-	otherDefaultRouteV6 := false
-	for _, network := range networks {
-		for _, gatewayRequest := range network.GatewayRequest {
-			if utilnet.IsIPv6(gatewayRequest) {
-				otherDefaultRouteV6 = true
-			} else {
-				otherDefaultRouteV4 = true
-			}
-		}
-	}
-
-	for _, podIfAddr := range podAnnotation.IPs {
-		isIPv6 := utilnet.IsIPv6CIDR(podIfAddr)
-		nodeSubnet, err := MatchFirstIPNetFamily(isIPv6, nodeSubnets)
-		if err != nil {
-			return err
-		}
-
-		gatewayIPnet := GetNodeGatewayIfAddr(nodeSubnet)
-
-		// Ensure default pod network traffic always goes to OVN
-		for _, clusterSubnet := range config.Default.ClusterSubnets {
-			if isIPv6 == utilnet.IsIPv6CIDR(clusterSubnet.CIDR) {
-				podAnnotation.Routes = append(podAnnotation.Routes, PodRoute{
-					Dest:    clusterSubnet.CIDR,
-					NextHop: gatewayIPnet.IP,
-				})
-			}
-		}
-
-		if podAnnotation.Role == types.NetworkRolePrimary {
-			// Ensure default service network traffic always goes to OVN
-			podAnnotation.Routes = append(podAnnotation.Routes, serviceCIDRToRoute(isIPv6, gatewayIPnet.IP)...)
-			// Ensure service hairpin masquerade traffic always goes to OVN
-			podAnnotation.Routes = append(podAnnotation.Routes, hairpinMasqueradeIPToRoute(isIPv6, gatewayIPnet.IP))
-			otherDefaultRoute := otherDefaultRouteV4
-			if isIPv6 {
-				otherDefaultRoute = otherDefaultRouteV6
-			}
-			if !otherDefaultRoute {
-				podAnnotation.Gateways = append(podAnnotation.Gateways, gatewayIPnet.IP)
-			}
-		}
-
-		// Ensure default join subnet traffic always goes to OVN
-		podAnnotation.Routes = append(podAnnotation.Routes, joinSubnetToRoute(netinfo, isIPv6, gatewayIPnet.IP))
-	}
-
-	return nil
 }
 
 // UnmarshalUDNOpenPortsAnnotation returns the OpenPorts from the pod annotation. If annotation is not present,
@@ -693,4 +552,9 @@ func UnmarshalUDNOpenPortsAnnotation(annotations map[string]string) ([]*OpenPort
 		}
 	}
 	return result, nil
+}
+
+// Ensure the IP is a valid IPv6 LLA
+func isIPv6LLA(ip net.IP) bool {
+	return utilnet.IsIPv6(ip) && ip.IsLinkLocalUnicast()
 }

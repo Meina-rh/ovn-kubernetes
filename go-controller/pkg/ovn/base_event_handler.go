@@ -9,13 +9,14 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	knet "k8s.io/api/networking/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
-	egressfirewall "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/metrics"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	egressfirewall "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/metrics/recorders"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 type baseNetworkControllerEventHandler struct{}
@@ -55,7 +56,9 @@ func (h *baseNetworkControllerEventHandler) areResourcesEqual(objType reflect.Ty
 		if !ok {
 			return false, fmt.Errorf("could not cast obj2 of type %T to *knet.NetworkPolicy", obj2)
 		}
-		return reflect.DeepEqual(np1, np2), nil
+		areEqual := apiequality.Semantic.DeepEqual(np1.Spec, np2.Spec) &&
+			np1.Annotations[ovnStatelessNetPolAnnotationName] == np2.Annotations[ovnStatelessNetPolAnnotationName]
+		return areEqual, nil
 
 	case factory.NodeType:
 		node1, ok := obj1.(*corev1.Node)
@@ -68,11 +71,7 @@ func (h *baseNetworkControllerEventHandler) areResourcesEqual(objType reflect.Ty
 		}
 
 		// when shouldUpdateNode is false, the hostsubnet is not assigned by ovn-kubernetes
-		shouldUpdate, err := shouldUpdateNode(node2, node1)
-		if err != nil {
-			klog.Errorf(err.Error())
-		}
-		return !shouldUpdate, nil
+		return !shouldUpdateNode(node2, node1), nil
 
 	case factory.PodType,
 		factory.EgressIPPodType:
@@ -110,7 +109,10 @@ func (h *baseNetworkControllerEventHandler) areResourcesEqual(objType reflect.Ty
 		if !ok {
 			return false, fmt.Errorf("could not cast obj2 of type %T to *multinetworkpolicyapi.MultiNetworkPolicy", obj2)
 		}
-		return reflect.DeepEqual(mnp1, mnp2), nil
+		areEqual := apiequality.Semantic.DeepEqual(mnp1.Spec, mnp2.Spec) &&
+			mnp1.Annotations[ovnStatelessNetPolAnnotationName] == mnp2.Annotations[ovnStatelessNetPolAnnotationName] &&
+			mnp1.Annotations[PolicyForAnnotation] == mnp2.Annotations[PolicyForAnnotation]
+		return areEqual, nil
 
 	case factory.IPAMClaimsType:
 		ipamClaim1, ok := obj1.(*ipamclaimsapi.IPAMClaim)
@@ -217,11 +219,11 @@ func (h *baseNetworkControllerEventHandler) recordAddEvent(objType reflect.Type,
 	case factory.PolicyType:
 		np := obj.(*knet.NetworkPolicy)
 		klog.V(5).Infof("Recording add event on network policy %s/%s", np.Namespace, np.Name)
-		metrics.GetConfigDurationRecorder().Start("networkpolicy", np.Namespace, np.Name)
+		recorders.GetConfigDurationRecorder().Start("networkpolicy", np.Namespace, np.Name)
 	case factory.MultiNetworkPolicyType:
 		mnp := obj.(*mnpapi.MultiNetworkPolicy)
 		klog.V(5).Infof("Recording add event on multinetwork policy %s/%s", mnp.Namespace, mnp.Name)
-		metrics.GetConfigDurationRecorder().Start("multinetworkpolicy", mnp.Namespace, mnp.Name)
+		recorders.GetConfigDurationRecorder().Start("multinetworkpolicy", mnp.Namespace, mnp.Name)
 	}
 }
 
@@ -231,11 +233,11 @@ func (h *baseNetworkControllerEventHandler) recordUpdateEvent(objType reflect.Ty
 	case factory.PolicyType:
 		np := obj.(*knet.NetworkPolicy)
 		klog.V(5).Infof("Recording update event on network policy %s/%s", np.Namespace, np.Name)
-		metrics.GetConfigDurationRecorder().Start("networkpolicy", np.Namespace, np.Name)
+		recorders.GetConfigDurationRecorder().Start("networkpolicy", np.Namespace, np.Name)
 	case factory.MultiNetworkPolicyType:
 		mnp := obj.(*mnpapi.MultiNetworkPolicy)
 		klog.V(5).Infof("Recording update event on multinetwork policy %s/%s", mnp.Namespace, mnp.Name)
-		metrics.GetConfigDurationRecorder().Start("multinetworkpolicy", mnp.Namespace, mnp.Name)
+		recorders.GetConfigDurationRecorder().Start("multinetworkpolicy", mnp.Namespace, mnp.Name)
 	}
 }
 
@@ -245,11 +247,11 @@ func (h *baseNetworkControllerEventHandler) recordDeleteEvent(objType reflect.Ty
 	case factory.PolicyType:
 		np := obj.(*knet.NetworkPolicy)
 		klog.V(5).Infof("Recording delete event on network policy %s/%s", np.Namespace, np.Name)
-		metrics.GetConfigDurationRecorder().Start("networkpolicy", np.Namespace, np.Name)
+		recorders.GetConfigDurationRecorder().Start("networkpolicy", np.Namespace, np.Name)
 	case factory.MultiNetworkPolicyType:
 		mnp := obj.(*mnpapi.MultiNetworkPolicy)
 		klog.V(5).Infof("Recording delete event on multinetwork policy %s/%s", mnp.Namespace, mnp.Name)
-		metrics.GetConfigDurationRecorder().Start("multinetworkpolicy", mnp.Namespace, mnp.Name)
+		recorders.GetConfigDurationRecorder().Start("multinetworkpolicy", mnp.Namespace, mnp.Name)
 	}
 }
 
@@ -259,10 +261,10 @@ func (h *baseNetworkControllerEventHandler) recordSuccessEvent(objType reflect.T
 	case factory.PolicyType:
 		np := obj.(*knet.NetworkPolicy)
 		klog.V(5).Infof("Recording success event on network policy %s/%s", np.Namespace, np.Name)
-		metrics.GetConfigDurationRecorder().End("networkpolicy", np.Namespace, np.Name)
+		recorders.GetConfigDurationRecorder().End("networkpolicy", np.Namespace, np.Name)
 	case factory.MultiNetworkPolicyType:
 		mnp := obj.(*mnpapi.MultiNetworkPolicy)
 		klog.V(5).Infof("Recording success event on multinetwork policy %s/%s", mnp.Namespace, mnp.Name)
-		metrics.GetConfigDurationRecorder().End("multinetworkpolicy", mnp.Namespace, mnp.Name)
+		recorders.GetConfigDurationRecorder().End("multinetworkpolicy", mnp.Namespace, mnp.Name)
 	}
 }

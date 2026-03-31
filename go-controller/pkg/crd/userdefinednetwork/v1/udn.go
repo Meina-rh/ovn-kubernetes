@@ -6,7 +6,7 @@ import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 //
 // +genclient
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-// +kubebuilder:resource:path=userdefinednetworks,scope=Namespaced
+// +kubebuilder:resource:path=userdefinednetworks,scope=Namespaced,shortName=udn
 // +kubebuilder:singular=userdefinednetwork
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
@@ -32,6 +32,7 @@ type UserDefinedNetworkSpec struct {
 	// Layer3 topology creates a layer 2 segment per node, each with a different subnet. Layer 3 routing is used to interconnect node subnets.
 	// Layer2 topology creates one logical switch shared by all nodes.
 	//
+	// +kubebuilder:validation:Enum=Layer2;Layer3
 	// +kubebuilder:validation:Required
 	// +required
 	// +unionDiscriminator

@@ -18,14 +18,18 @@ limitations under the License.
 package v1
 
 import (
-	v1 "k8s.io/client-go/applyconfigurations/meta/v1"
+	metav1 "k8s.io/client-go/applyconfigurations/meta/v1"
 )
 
 // EgressQoSStatusApplyConfiguration represents a declarative configuration of the EgressQoSStatus type for use
 // with apply.
+//
+// EgressQoSStatus defines the observed state of EgressQoS
 type EgressQoSStatusApplyConfiguration struct {
-	Status     *string                          `json:"status,omitempty"`
-	Conditions []v1.ConditionApplyConfiguration `json:"conditions,omitempty"`
+	// A concise indication of whether the EgressQoS resource is applied with success.
+	Status *string `json:"status,omitempty"`
+	// An array of condition objects indicating details about status of EgressQoS object.
+	Conditions []metav1.ConditionApplyConfiguration `json:"conditions,omitempty"`
 }
 
 // EgressQoSStatusApplyConfiguration constructs a declarative configuration of the EgressQoSStatus type for use with
@@ -45,7 +49,7 @@ func (b *EgressQoSStatusApplyConfiguration) WithStatus(value string) *EgressQoSS
 // WithConditions adds the given value to the Conditions field in the declarative configuration
 // and returns the receiver, so that objects can be build by chaining "With" function invocations.
 // If called multiple times, values provided by each call will be appended to the Conditions field.
-func (b *EgressQoSStatusApplyConfiguration) WithConditions(values ...*v1.ConditionApplyConfiguration) *EgressQoSStatusApplyConfiguration {
+func (b *EgressQoSStatusApplyConfiguration) WithConditions(values ...*metav1.ConditionApplyConfiguration) *EgressQoSStatusApplyConfiguration {
 	for i := range values {
 		if values[i] == nil {
 			panic("nil value passed to WithConditions")

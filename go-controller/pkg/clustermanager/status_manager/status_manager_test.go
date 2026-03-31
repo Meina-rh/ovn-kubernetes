@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -16,14 +17,17 @@ import (
 	anpapi "sigs.k8s.io/network-policy-api/apis/v1alpha1"
 	anpfake "sigs.k8s.io/network-policy-api/pkg/client/clientset/versioned/fake"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/clustermanager/status_manager/zone_tracker"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	adminpolicybasedrouteapi "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1"
-	egressfirewallapi "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1"
-	egressqosapi "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/clustermanager/status_manager/zone_tracker"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	adminpolicybasedrouteapi "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1"
+	egressfirewallapi "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1"
+	egressfirewallfake "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/clientset/versioned/fake"
+	egressqosapi "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1"
+	networkqosapi "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/networkqos/v1alpha1"
+	crdtypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -198,6 +202,77 @@ func checkEmptyEQStatusConsistently(egressQoS *egressqosapi.EgressQoS, fakeClien
 	Consistently(func() bool {
 		ef, err := fakeClient.EgressQoSClient.K8sV1().EgressQoSes(egressQoS.Namespace).
 			Get(context.TODO(), egressQoS.Name, metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		return ef.Status.Status == ""
+	}).Should(BeTrue(), "expected Status to be consistently empty")
+}
+
+func newNetworkQoS(namespace string) *networkqosapi.NetworkQoS {
+	return &networkqosapi.NetworkQoS{
+		ObjectMeta: util.NewObjectMeta("default", namespace),
+		Spec: networkqosapi.Spec{
+			NetworkSelectors: []crdtypes.NetworkSelector{
+				{
+					NetworkSelectionType: crdtypes.NetworkAttachmentDefinitions,
+					NetworkAttachmentDefinitionSelector: &crdtypes.NetworkAttachmentDefinitionSelector{
+						NetworkSelector: metav1.LabelSelector{
+							MatchLabels: map[string]string{
+								"name": "stream",
+							},
+						},
+					},
+				},
+			},
+			Priority: 100,
+			Egress: []networkqosapi.Rule{
+				{
+					DSCP: 60,
+					Classifier: networkqosapi.Classifier{
+						To: []networkqosapi.Destination{
+							{
+								IPBlock: &networkingv1.IPBlock{
+									CIDR: "1.2.3.4/32",
+								},
+							},
+						},
+					},
+					Bandwidth: networkqosapi.Bandwidth{
+						Rate:  100,
+						Burst: 1000,
+					},
+				},
+			},
+		},
+	}
+}
+
+func updateNetworkQoSStatus(networkQoS *networkqosapi.NetworkQoS, status *networkqosapi.Status,
+	fakeClient *util.OVNClusterManagerClientset) {
+	networkQoS.Status = *status
+	_, err := fakeClient.NetworkQoSClient.K8sV1alpha1().NetworkQoSes(networkQoS.Namespace).
+		Update(context.TODO(), networkQoS, metav1.UpdateOptions{})
+	Expect(err).ToNot(HaveOccurred())
+}
+
+func checkNQStatusEventually(networkQoS *networkqosapi.NetworkQoS, expectFailure bool, expectEmpty bool, fakeClient *util.OVNClusterManagerClientset) {
+	Eventually(func() bool {
+		eq, err := fakeClient.NetworkQoSClient.K8sV1alpha1().NetworkQoSes(networkQoS.Namespace).
+			Get(context.TODO(), networkQoS.Name, metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		if expectFailure {
+			return strings.Contains(eq.Status.Status, types.NetworkQoSErrorMsg)
+		} else if expectEmpty {
+			return eq.Status.Status == ""
+		} else {
+			return strings.Contains(eq.Status.Status, "applied")
+		}
+	}).Should(BeTrue(), fmt.Sprintf("expected network QoS status with expectFailure=%v expectEmpty=%v", expectFailure, expectEmpty))
+}
+
+func checkEmptyNQStatusConsistently(networkQoS *networkqosapi.NetworkQoS, fakeClient *util.OVNClusterManagerClientset) {
+	Consistently(func() bool {
+		ef, err := fakeClient.NetworkQoSClient.K8sV1alpha1().NetworkQoSes(networkQoS.Namespace).
+			Get(context.TODO(), networkQoS.Name, metav1.GetOptions{})
 		Expect(err).NotTo(HaveOccurred())
 		return ef.Status.Status == ""
 	}).Should(BeTrue(), "expected Status to be consistently empty")
@@ -505,4 +580,274 @@ var _ = Describe("Cluster Manager Status Manager", func() {
 			return atomic.LoadUint32(&banpWerePatched)
 		}).Should(Equal(uint32(2)))
 	})
+
+	It("Should clean up EgressFirewall managedFields when a zone is deleted", func() {
+		config.OVNKubernetesFeature.EnableEgressFirewall = true
+		namespace1 := util.NewNamespace(namespace1Name)
+		egressFirewall := newEgressFirewall(namespace1.Name)
+		// Set up the initial state: 2 zones have reported status
+		egressFirewall.Status = egressfirewallapi.EgressFirewallStatus{
+			Messages: []string{
+				types.GetZoneStatus("zone1", "zone1: EgressFirewall Rules applied"),
+				types.GetZoneStatus("zone2", "zone2: EgressFirewall Rules applied"),
+			},
+		}
+		egressFirewall.ManagedFields = []metav1.ManagedFieldsEntry{
+			{Manager: "zone1", Subresource: "status", FieldsV1: &metav1.FieldsV1{Raw: []byte(`{"f:status":{"f:messages":{"v:\"zone1: zone1: EgressFirewall Rules applied\"":{}}}}`)}},
+			{Manager: "zone2", Subresource: "status", FieldsV1: &metav1.FieldsV1{Raw: []byte(`{"f:status":{"f:messages":{"v:\"zone2: zone2: EgressFirewall Rules applied\"":{}}}}`)}},
+		}
+
+		// Set up a reactor to intercept cleanup patches and track which zones are cleaned
+		var cleanupCalled atomic.Uint32
+		objects := []runtime.Object{namespace1, egressFirewall}
+		zones := sets.New("zone1", "zone2")
+		for _, zone := range zones.UnsortedList() {
+			objects = append(objects, getNodeWithZone(zone, zone))
+		}
+		fakeClient = util.GetOVNClientset(objects...).GetClusterManagerClientset()
+		fakeClient.EgressFirewallClient.(*egressfirewallfake.Clientset).PrependReactor("patch", "egressfirewalls", func(action clienttesting.Action) (handled bool, ret runtime.Object, err error) {
+			patchAction := action.(clienttesting.PatchAction)
+			if patchAction.GetSubresource() == "status" {
+				patch := string(patchAction.GetPatch())
+				klog.Infof("Status patch intercepted: %s", patch)
+
+				// Only count cleanup patches, where the status field is empty
+				if !strings.Contains(patch, `"status"`) {
+					cleanupCalled.Add(1)
+					klog.Infof("Cleanup patch detected for zone2")
+				} else {
+					klog.Infof("Normal status update patch (not a cleanup)")
+				}
+			}
+			return false, nil, nil
+		})
+
+		// Now start the watch factory and status manager
+		var err error
+		wf, err = factory.NewClusterManagerWatchFactory(fakeClient)
+		Expect(err).NotTo(HaveOccurred())
+		statusManager = NewStatusManager(wf, fakeClient)
+
+		err = wf.Start()
+		Expect(err).NotTo(HaveOccurred())
+
+		err = statusManager.Start()
+		Expect(err).NotTo(HaveOccurred())
+
+		// Simulate deleting zone2 (now zones = {zone1})
+		// This will trigger message-based cleanup because len(messages)=2 > zones.Len()=1
+		statusManager.onZoneUpdate(sets.New("zone1"))
+
+		// Verify cleanup was called for the deleted zone
+		// NOTE: Due to fake client limitations (doesn't support SSA), cleanup may be called
+		// multiple times since the message doesn't actually get removed. We verify it's
+		// called at least once, which proves the message-based cleanup logic is triggered.
+		Eventually(func() uint32 {
+			return cleanupCalled.Load()
+		}).Should(BeNumerically(">=", uint32(1)), "Expected cleanup to be called at least once for deleted zone")
+
+		// Note: We cannot verify that managedFields were actually removed because the fake client
+		// doesn't properly support Server-Side Apply with FieldManagers.
+		// But we verified that cleanupStatus was called with the correct zone
+	})
+
+	It("Should clean up stale EgressFirewall managedFields on startup (upgrade scenario)", func() {
+		config.OVNKubernetesFeature.EnableEgressFirewall = true
+		namespace1 := util.NewNamespace(namespace1Name)
+		egressFirewall := newEgressFirewall(namespace1.Name)
+
+		// Let's mimick an upgrade scenario:
+		// - Status messages are already correct (only 2 zones report status)
+		// - managedFields still has 3 entries (old code didn't clean up)
+		// - stale managedField from zone3-deleted should be removed
+		egressFirewall.Status = egressfirewallapi.EgressFirewallStatus{
+			Messages: []string{
+				types.GetZoneStatus("zone1", "zone1: EgressFirewall Rules applied"),
+				types.GetZoneStatus("zone2", "zone2: EgressFirewall Rules applied"),
+			},
+		}
+		egressFirewall.ManagedFields = []metav1.ManagedFieldsEntry{
+			// Valid managedFields with actual message content nested inside
+			{Manager: "zone1", Subresource: "status", FieldsV1: &metav1.FieldsV1{Raw: []byte(`{"f:status":{"f:messages":{"v:\"zone1: EgressFirewall Rules applied\"":{}}}}`)}},
+			{Manager: "zone2", Subresource: "status", FieldsV1: &metav1.FieldsV1{Raw: []byte(`{"f:status":{"f:messages":{"v:\"zone2: EgressFirewall Rules applied\"":{}}}}`)}},
+			// Stale managedField with empty status (left by buggy code when zone was deleted)
+			{Manager: "zone3-deleted", Subresource: "status", FieldsV1: &metav1.FieldsV1{Raw: []byte(`{"f:status":{}}`)}},
+			// Legitimate cluster-manager managedField with its own nested structure
+			{Manager: "cluster-manager", Subresource: "status", FieldsV1: &metav1.FieldsV1{Raw: []byte(`{"f:status":{"f:status":{}}}`)}},
+		}
+
+		var cleanupCalled atomic.Uint32
+		var cleanupFieldManager atomic.Pointer[string]
+
+		// We need to create the egress firewall before starting status manager,
+		// so we can check if the initial cleanup takes place
+		objects := []runtime.Object{namespace1, egressFirewall}
+
+		// Add nodes for only zone1 and zone2 (zone3-deleted doesn't exist)
+		zones := sets.New("zone1", "zone2")
+		for _, zone := range zones.UnsortedList() {
+			objects = append(objects, getNodeWithZone(zone, zone))
+		}
+		fakeClient = util.GetOVNClientset(objects...).GetClusterManagerClientset()
+
+		// Set up a reactor to intercept cleanup patches
+		fakeClient.EgressFirewallClient.(*egressfirewallfake.Clientset).PrependReactor("patch", "egressfirewalls", func(action clienttesting.Action) (handled bool, ret runtime.Object, err error) {
+			patchAction := action.(clienttesting.PatchAction)
+			if patchAction.GetSubresource() == "status" {
+				patch := string(patchAction.GetPatch())
+
+				// Check if this is a cleanup patch (empty ApplyStatus) vs normal status update
+				// Cleanup patches have no status field, normal status updates have a "status" field
+				// with actual content
+				if !strings.Contains(patch, `"status"`) {
+					cleanupCalled.Add(1)
+					manager := "zone3-deleted"
+					cleanupFieldManager.Store(&manager)
+					klog.Infof("Cleanup patch detected for zone3-deleted")
+				}
+			}
+			return false, nil, nil
+		})
+
+		// Now start the watch factory and status manager
+		var err error
+		wf, err = factory.NewClusterManagerWatchFactory(fakeClient)
+		Expect(err).NotTo(HaveOccurred())
+		statusManager = NewStatusManager(wf, fakeClient)
+
+		err = wf.Start()
+		Expect(err).NotTo(HaveOccurred())
+
+		// When statusManager Start() is called, it triggers ZoneTracker initialSync, which should:
+		// 1. Discover current zones (zone1, zone2)
+		// 2. Call onZonesUpdate
+		// 3. Trigger ReconcileAll
+		// 4. ReconcileAll calls the one-time startup cleanup
+		// 5. Startup cleanup detects zone3-deleted has a stale empty-status managedField
+		//    managed by a zone that is not listed between the current zonesb
+		// 6. cleanupStatus is called for zone3-deleted
+		err = statusManager.Start()
+		Expect(err).NotTo(HaveOccurred())
+
+		// Verify cleanup was called for the stale zone
+		Eventually(func() uint32 {
+			return cleanupCalled.Load()
+		}).Should(Equal(uint32(1)), "Expected cleanup to be called exactly once for stale zone")
+
+		// Ensure cleanup doesn't get called multiple times
+		Consistently(func() uint32 {
+			return cleanupCalled.Load()
+		}).Should(Equal(uint32(1)), "Expected cleanup to be called exactly once and not repeated")
+
+		Eventually(func() string {
+			if managerPtr := cleanupFieldManager.Load(); managerPtr != nil {
+				return *managerPtr
+			}
+			return ""
+		}).Should(Equal("zone3-deleted"))
+
+		// Check that we still have 2 messages (startup cleanup doesn't touch messages)
+		ef, err := fakeClient.EgressFirewallClient.K8sV1().EgressFirewalls(egressFirewall.Namespace).Get(context.TODO(), egressFirewall.Name, metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(ef.Status.Messages).To(HaveLen(2))
+
+		// The fake client doesn't properly handle SSA managedFields, so we can't verify
+		// that zone3-deleted was actually removed from managedFields.
+		// But we verified that cleanupStatus was called with the correct zone name
+		// TODO: when fake client supports server side apply, check that the managed field with the stale zone gets deleted.
+		Expect(egressFirewall.ManagedFields).To(HaveLen(4))
+
+	})
+
+	It("updates NetworkQoS status with 1 zone", func() {
+		config.OVNKubernetesFeature.EnableNetworkQoS = true
+		zones := sets.New[string]("zone1")
+		namespace1 := util.NewNamespace(namespace1Name)
+		networkQoS := newNetworkQoS(namespace1.Name)
+		start(zones, namespace1, networkQoS)
+		updateNetworkQoSStatus(networkQoS, &networkqosapi.Status{
+			Conditions: []metav1.Condition{{
+				Type:    "Ready-In-Zone-zone1",
+				Status:  metav1.ConditionTrue,
+				Reason:  "SetupSucceeded",
+				Message: "NetworkQoS Destinations applied",
+			}},
+		}, fakeClient)
+
+		checkNQStatusEventually(networkQoS, false, false, fakeClient)
+	})
+
+	It("updates NetworkQoS status with 2 zones", func() {
+		config.OVNKubernetesFeature.EnableNetworkQoS = true
+		zones := sets.New[string]("zone1", "zone2")
+		namespace1 := util.NewNamespace(namespace1Name)
+		networkQoS := newNetworkQoS(namespace1.Name)
+		start(zones, namespace1, networkQoS)
+
+		updateNetworkQoSStatus(networkQoS, &networkqosapi.Status{
+			Conditions: []metav1.Condition{{
+				Type:    "Ready-In-Zone-zone1",
+				Status:  metav1.ConditionTrue,
+				Reason:  "SetupSucceeded",
+				Message: "NetworkQoS Destinations applied",
+			}},
+		}, fakeClient)
+
+		checkEmptyNQStatusConsistently(networkQoS, fakeClient)
+
+		updateNetworkQoSStatus(networkQoS, &networkqosapi.Status{
+			Conditions: []metav1.Condition{{
+				Type:    "Ready-In-Zone-zone1",
+				Status:  metav1.ConditionTrue,
+				Reason:  "SetupSucceeded",
+				Message: "NetworkQoS Destinations applied",
+			}, {
+				Type:    "Ready-In-Zone-zone2",
+				Status:  metav1.ConditionTrue,
+				Reason:  "SetupSucceeded",
+				Message: "NetworkQoS Destinations applied",
+			}},
+		}, fakeClient)
+		checkNQStatusEventually(networkQoS, false, false, fakeClient)
+
+	})
+
+	It("updates NetworkQoS status with UnknownZone", func() {
+		config.OVNKubernetesFeature.EnableNetworkQoS = true
+		zones := sets.New[string]("zone1", zone_tracker.UnknownZone)
+		namespace1 := util.NewNamespace(namespace1Name)
+		networkQoS := newNetworkQoS(namespace1.Name)
+		start(zones, namespace1, networkQoS)
+
+		// no matter how many messages are in the status, it won't be updated while UnknownZone is present
+		updateNetworkQoSStatus(networkQoS, &networkqosapi.Status{
+			Conditions: []metav1.Condition{{
+				Type:    "Ready-In-Zone-zone1",
+				Status:  metav1.ConditionTrue,
+				Reason:  "SetupSucceeded",
+				Message: "NetworkQoS Destinations applied",
+			}},
+		}, fakeClient)
+		checkEmptyNQStatusConsistently(networkQoS, fakeClient)
+
+		// when UnknownZone is removed, updates will be handled, but status from the new zone is not reported yet
+		statusManager.onZoneUpdate(sets.New[string]("zone1", "zone2"))
+		checkEmptyNQStatusConsistently(networkQoS, fakeClient)
+		// when new zone status is reported, status will be set
+		updateNetworkQoSStatus(networkQoS, &networkqosapi.Status{
+			Conditions: []metav1.Condition{{
+				Type:    "Ready-In-Zone-zone1",
+				Status:  metav1.ConditionTrue,
+				Reason:  "SetupSucceeded",
+				Message: "NetworkQoS Destinations applied",
+			}, {
+				Type:    "Ready-In-Zone-zone2",
+				Status:  metav1.ConditionTrue,
+				Reason:  "SetupSucceeded",
+				Message: "NetworkQoS Destinations applied",
+			}},
+		}, fakeClient)
+		checkNQStatusEventually(networkQoS, false, false, fakeClient)
+	})
+
 })

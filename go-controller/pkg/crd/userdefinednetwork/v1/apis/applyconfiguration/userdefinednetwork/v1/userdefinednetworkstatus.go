@@ -18,13 +18,15 @@ limitations under the License.
 package v1
 
 import (
-	v1 "k8s.io/client-go/applyconfigurations/meta/v1"
+	metav1 "k8s.io/client-go/applyconfigurations/meta/v1"
 )
 
 // UserDefinedNetworkStatusApplyConfiguration represents a declarative configuration of the UserDefinedNetworkStatus type for use
 // with apply.
+//
+// UserDefinedNetworkStatus contains the observed status of the UserDefinedNetwork.
 type UserDefinedNetworkStatusApplyConfiguration struct {
-	Conditions []v1.ConditionApplyConfiguration `json:"conditions,omitempty"`
+	Conditions []metav1.ConditionApplyConfiguration `json:"conditions,omitempty"`
 }
 
 // UserDefinedNetworkStatusApplyConfiguration constructs a declarative configuration of the UserDefinedNetworkStatus type for use with
@@ -36,7 +38,7 @@ func UserDefinedNetworkStatus() *UserDefinedNetworkStatusApplyConfiguration {
 // WithConditions adds the given value to the Conditions field in the declarative configuration
 // and returns the receiver, so that objects can be build by chaining "With" function invocations.
 // If called multiple times, values provided by each call will be appended to the Conditions field.
-func (b *UserDefinedNetworkStatusApplyConfiguration) WithConditions(values ...*v1.ConditionApplyConfiguration) *UserDefinedNetworkStatusApplyConfiguration {
+func (b *UserDefinedNetworkStatusApplyConfiguration) WithConditions(values ...*metav1.ConditionApplyConfiguration) *UserDefinedNetworkStatusApplyConfiguration {
 	for i := range values {
 		if values[i] == nil {
 			panic("nil value passed to WithConditions")

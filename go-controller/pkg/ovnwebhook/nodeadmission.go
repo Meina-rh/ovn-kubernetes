@@ -10,14 +10,13 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	nodeutil "k8s.io/component-helpers/node/util"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
-	hotypes "github.com/ovn-org/ovn-kubernetes/go-controller/hybrid-overlay/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	hotypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/hybrid-overlay/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 // checkNodeAnnot defines additional checks for the allowed annotations
@@ -34,6 +33,8 @@ var commonNodeAnnotationChecks = map[string]checkNodeAnnot{
 	util.OvnNodeMasqCIDR:                   nil,
 	util.OvnNodeGatewayMtuSupport:          nil,
 	util.OvnNodeManagementPort:             nil,
+	util.OvnNodeDontSNATSubnets:            nil,
+	util.OVNNodePrimaryDPUHostAddr:         nil,
 	util.OvnNodeChassisID: func(v annotationChange, _ string) error {
 		if v.action == removed {
 			return fmt.Errorf("%s cannot be removed", util.OvnNodeChassisID)
@@ -52,17 +53,17 @@ var commonNodeAnnotationChecks = map[string]checkNodeAnnot{
 
 		return fmt.Errorf("%s can only be set to %s or %s, it cannot be removed", util.OvnNodeZoneName, types.OvnDefaultZone, nodeName)
 	},
+	util.OVNNodeEncapIPs: nil,
 }
 
 // interconnectNodeAnnotationChecks holds annotations allowed for ovnkube-node:<nodeName> users in IC environments
 var interconnectNodeAnnotationChecks = map[string]checkNodeAnnot{
-	util.OvnNodeMigratedZoneName: func(v annotationChange, nodeName string) error {
-		// it is allowed for the annotation to be set to <nodeName>
-		if (v.action == added || v.action == changed) && v.value == nodeName {
+	util.Layer2TopologyVersion: func(v annotationChange, _ string) error {
+		// it is allowed for the annotation to be added or removed
+		if v.action == added || v.action == removed {
 			return nil
 		}
-
-		return fmt.Errorf("%s can only be set to %s, it cannot be removed", util.OvnNodeMigratedZoneName, nodeName)
+		return fmt.Errorf("%s can only be added or removed, not updated", util.Layer2TopologyVersion)
 	},
 }
 
@@ -94,21 +95,19 @@ func NewNodeAdmissionWebhook(enableInterconnect, enableHybridOverlay bool, extra
 	}
 }
 
-var _ admission.CustomValidator = &NodeAdmission{}
+var _ admission.Validator[*corev1.Node] = &NodeAdmission{}
 
-func (p NodeAdmission) ValidateCreate(_ context.Context, _ runtime.Object) (warnings admission.Warnings, err error) {
+func (p NodeAdmission) ValidateCreate(_ context.Context, _ *corev1.Node) (warnings admission.Warnings, err error) {
 	// Ignore creation, the webhook is configured to only handle nodes/status updates
 	return nil, nil
 }
 
-func (p NodeAdmission) ValidateDelete(_ context.Context, _ runtime.Object) (warnings admission.Warnings, err error) {
+func (p NodeAdmission) ValidateDelete(_ context.Context, _ *corev1.Node) (warnings admission.Warnings, err error) {
 	// Ignore deletion, the webhook is configured to only handle nodes/status updates
 	return nil, nil
 }
 
-func (p NodeAdmission) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (warnings admission.Warnings, err error) {
-	oldNode := oldObj.(*corev1.Node)
-	newNode := newObj.(*corev1.Node)
+func (p NodeAdmission) ValidateUpdate(ctx context.Context, oldNode, newNode *corev1.Node) (warnings admission.Warnings, err error) {
 
 	req, err := admission.RequestFromContext(ctx)
 	if err != nil {
@@ -177,7 +176,7 @@ func (p NodeAdmission) ValidateUpdate(ctx context.Context, oldObj, newObj runtim
 		_, newCondition := nodeutil.GetNodeCondition(&(newNodeShallowCopy.Status), corev1.NodeNetworkUnavailable)
 
 		// In GCP OVN-Kubernetes modifies NodeNetworkUnavailable condition on the nodes, allow an update of the condition
-		// https://github.com/ovn-org/ovn-kubernetes/blob/e2e442133f16699671bb6564c4b8863229841fd9/go-controller/pkg/ovn/master.go#L507
+		// https://github.com/ovn-kubernetes/ovn-kubernetes/blob/e2e442133f16699671bb6564c4b8863229841fd9/go-controller/pkg/ovn/master.go#L507
 		if oldId >= 0 && newCondition != nil && !reflect.DeepEqual(oldCondition, newCondition) {
 			// Replace the old NodeNetworkUnavailable condition with the new one to make DeepEqual happy
 			conditionsDeepCopy := make([]corev1.NodeCondition, len(oldNodeShallowCopy.Status.Conditions))

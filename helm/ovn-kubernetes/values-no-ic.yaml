@@ -8,11 +8,12 @@ tags:
   ovnkube-node-dpu: false
   ovnkube-node-dpu-host: false
   ovnkube-single-node-zone: false
+  ovnkube-single-node-zone-dpu: false
   ovnkube-zone-controller: false
 
 # -- Endpoint of Kubernetes api server
 k8sAPIServer: https://172.25.0.2:6443
-# -- IP range for Kubernetes pods, /14 is the top level range, under which each /23 range will be assigned to a node
+# -- IP range for Kubernetes pods, /16 is the top level range, under which each /24 range will be assigned to a node
 podNetwork: 10.244.0.0/16/24
 # -- A comma-separated set of CIDR notation IP ranges from which k8s assigns service cluster IPs. This should be the same as the value provided for kube-apiserver "--service-cluster-ip-range" option
 serviceNetwork: 10.96.0.0/16
@@ -62,10 +63,34 @@ global:
   enableEgressFirewall: true
   # -- Configure to use EgressQoS CRD feature with ovn-kubernetes
   enableEgressQos: true
+  # -- Enables network QoS support from/to pods
+  enableNetworkQos: false
   # -- Enables multicast support between the pods within the same namespace
   enableMulticast: ""
   # -- Configure to use multiple NetworkAttachmentDefinition CRD feature with ovn-kubernetes
   enableMultiNetwork: false
+  # -- Configure to use user defined networks (UDN) feature with ovn-kubernetes
+  enableNetworkSegmentation: false
+  # -- Configure to use route advertisements feature with ovn-kubernetes
+  enableRouteAdvertisements: false
+  # -- Configure to use EVPN feature with ovn-kubernetes
+  enableEVPN: false
+  # -- Advertise default network on all nodes with a default RouteAdvertisements configuration
+  advertiseDefaultNetwork: false
+  # -- Pod network isolation between advertised UDN networks. (strict or loose)
+  advertisedUDNIsolationMode: "strict"
+  # -- Configure to enable no-overlay mode for the default network
+  enableNoOverlay: false
+  # -- Configure to enable SNAT for outbound traffic in no-overlay mode
+  enableNoOverlaySnat: false
+  # -- Configure to enable managed routing mode for no-overlay (automatically configures internal BGP fabric)
+  enableNoOverlayManagedRouting: false
+  # -- BGP AS number for managed routing mode
+  managedBGPASNumber: 64512
+  # -- BGP topology for managed routing mode (currently only full-mesh)
+  managedBGPTopology: "full-mesh"
+  # -- FRR namespace for managed routing mode
+  managedBGPFRRNamespace: "frr-k8s-system"
   # -- Configure to enable IPsec
   enableIpsec: false
   # -- Use SSL transport to NB/SB db and northd
@@ -89,6 +114,8 @@ global:
   enableLFlowCache: true
   # -- Configure to use DNSNameResolver feature with ovn-kubernetes
   enableDNSNameResolver: false
+  # -- Configure to allow ICMP and ICMPv6 traffic to bypass NetworkPolicy deny rules
+  allowICMPNetworkPolicy: false
   # -- Maximum number of logical flow cache entries ovn-controller may create when the logical flow cache is enabled
   # @default -- unlimited
   lFlowCacheLimit: ""
@@ -101,8 +128,6 @@ global:
   disableForwarding: ""
   # -- Disables adding openflow flows to check packets too large to be delivered to OVN due to pod MTU being lower than NIC MTU
   disablePacketMtuCheck: ""
-  # -- Deprecated: iface-id-ver is always enabled
-  disableIfaceIdVer: false
   # -- Enable/disable requested-chassis option on lsp during pod creation. Must be set to true when cluster has DPUs
   disableRequestedchassis: false
   # -- The largest number of messages per second that gets logged before drop
@@ -165,10 +190,6 @@ global:
     auth: blah_blah_blah
     create: false
 
-ovnkube-identity:
-    # -- number of ovnube-identity pods, co-located with kube-apiserver process, so need to be the same number of control plane nodes
-    replicas: 1
-
 ovnkube-master:
     # -- number of ovnkube-master pods
     replicas: 1
@@ -181,3 +202,7 @@ monitoring:
   # in defining that.
   commonServiceMonitorSelectorLabels:
     release: kube-prometheus-stack
+  # -- deploy ServiceMonitors for service discovery using the Prometheus Operator
+  enableServiceMonitor: false
+  # -- deploy PrometheusRules for specific metric collection using the Prometheus Operator
+  enablePrometheusRule: false

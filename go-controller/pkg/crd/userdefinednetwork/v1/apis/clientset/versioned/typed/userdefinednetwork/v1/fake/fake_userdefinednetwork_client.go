@@ -18,7 +18,7 @@ limitations under the License.
 package fake
 
 import (
-	v1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1/apis/clientset/versioned/typed/userdefinednetwork/v1"
+	v1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1/apis/clientset/versioned/typed/userdefinednetwork/v1"
 	rest "k8s.io/client-go/rest"
 	testing "k8s.io/client-go/testing"
 )
@@ -28,11 +28,11 @@ type FakeK8sV1 struct {
 }
 
 func (c *FakeK8sV1) ClusterUserDefinedNetworks() v1.ClusterUserDefinedNetworkInterface {
-	return &FakeClusterUserDefinedNetworks{c}
+	return newFakeClusterUserDefinedNetworks(c)
 }
 
 func (c *FakeK8sV1) UserDefinedNetworks(namespace string) v1.UserDefinedNetworkInterface {
-	return &FakeUserDefinedNetworks{c, namespace}
+	return newFakeUserDefinedNetworks(c, namespace)
 }
 
 // RESTClient returns a RESTClient that is used to communicate

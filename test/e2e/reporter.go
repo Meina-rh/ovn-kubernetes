@@ -13,11 +13,11 @@ import (
 
 	"github.com/onsi/ginkgo/v2"
 
-	aprv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1"
-	egressfwv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1"
-	egressipv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
-	egressqosv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1"
-	egressservicev1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1"
+	aprv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1"
+	egressfwv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1"
+	egressipv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
+	egressqosv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1"
+	egressservicev1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1"
 
 	"github.com/openshift-kni/k8sreporter"
 	"github.com/pkg/errors"
@@ -81,7 +81,6 @@ func InitReporter(kubeconfig, path string, namespaces []string) *k8sreporter.Kub
 		{Cr: &egressqosv1.EgressQoSList{}},
 		{Cr: &egressservicev1.EgressServiceList{}},
 		{Cr: &metallbv1beta1.IPAddressPoolList{}},
-		{Cr: &metallbv1beta1.AddressPoolList{}},
 		{Cr: &metallbv1beta2.BGPPeerList{}},
 		{Cr: &metallbv1beta1.L2AdvertisementList{}},
 		{Cr: &metallbv1beta1.BGPAdvertisementList{}},
@@ -262,5 +261,5 @@ func describeSvc(ns string) {
 	framework.Logf("\nOutput of kubectl describe svc:\n")
 	desc, _ := e2ekubectl.RunKubectl(
 		ns, "describe", "svc", fmt.Sprintf("--namespace=%v", ns))
-	framework.Logf(desc)
+	framework.Logf("%s", desc)
 }

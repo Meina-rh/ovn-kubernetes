@@ -6,11 +6,11 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	adminpolicybasedrouteapi "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1"
-	adminpolicybasedrouteapply "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1/apis/applyconfiguration/adminpolicybasedroute/v1"
-	adminpolicybasedrouteclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1/apis/clientset/versioned"
-	adminpolicybasedroutelisters "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1/apis/listers/adminpolicybasedroute/v1"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
+	adminpolicybasedrouteapi "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1"
+	adminpolicybasedrouteapply "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1/apis/applyconfiguration/adminpolicybasedroute/v1"
+	adminpolicybasedrouteclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1/apis/clientset/versioned"
+	adminpolicybasedroutelisters "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1/apis/listers/adminpolicybasedroute/v1"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
 )
 
 type apbRouteManager struct {
@@ -33,6 +33,11 @@ func (m *apbRouteManager) get(_, name string) (*adminpolicybasedrouteapi.AdminPo
 //lint:ignore U1000 generic interfaces throw false-positives
 func (m *apbRouteManager) getMessages(route *adminpolicybasedrouteapi.AdminPolicyBasedExternalRoute) []string {
 	return route.Status.Messages
+}
+
+//lint:ignore U1000 generic interfaces throw false-positives
+func (m *apbRouteManager) getManagedFields(route *adminpolicybasedrouteapi.AdminPolicyBasedExternalRoute) []metav1.ManagedFieldsEntry {
+	return route.ManagedFields
 }
 
 //lint:ignore U1000 generic interfaces throw false-positives
@@ -72,8 +77,7 @@ func (m *apbRouteManager) updateStatus(route *adminpolicybasedrouteapi.AdminPoli
 
 //lint:ignore U1000 generic interfaces throw false-positives
 func (m *apbRouteManager) cleanupStatus(route *adminpolicybasedrouteapi.AdminPolicyBasedExternalRoute, applyOpts *metav1.ApplyOptions) error {
-	applyObj := adminpolicybasedrouteapply.AdminPolicyBasedExternalRoute(route.Name).
-		WithStatus(adminpolicybasedrouteapply.AdminPolicyBasedRouteStatus())
+	applyObj := adminpolicybasedrouteapply.AdminPolicyBasedExternalRoute(route.Name)
 	_, err := m.client.K8sV1().AdminPolicyBasedExternalRoutes().ApplyStatus(context.TODO(), applyObj, *applyOpts)
 	return err
 }

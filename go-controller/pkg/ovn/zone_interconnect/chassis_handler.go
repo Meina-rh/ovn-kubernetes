@@ -10,13 +10,13 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 
-	libovsdbclient "github.com/ovn-org/libovsdb/client"
+	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/sbdb"
-	ovntypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/sbdb"
+	ovntypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 // ZoneChassisHandler creates chassis records for the remote zone nodes
@@ -134,30 +134,44 @@ func (zch *ZoneChassisHandler) createOrUpdateNodeChassis(node *corev1.Node, isRe
 			node.Name, parsedErr)
 	}
 
-	nodePrimaryIp, err := util.GetNodePrimaryIP(node)
+	// Get the encap IPs.
+	encapIPs, err := util.ParseNodeEncapIPsAnnotation(node)
 	if err != nil {
-		return fmt.Errorf("failed to parse node %s primary IP %w", node.Name, err)
+		return fmt.Errorf("failed to parse node-encap-ips for node - %s, error: %w",
+			node.Name, err)
+	}
+
+	encaps := make([]*sbdb.Encap, 0, len(encapIPs))
+	encapOptions := map[string]string{}
+	encapOptions["csum"] = "true"
+	// set the geneve port if using something else than default
+	if config.Default.EncapPort != config.DefaultEncapPort {
+		encapOptions["dst_port"] = strconv.FormatUint(uint64(config.Default.EncapPort), 10)
+	}
+
+	for _, ovnEncapIP := range encapIPs {
+		encap := sbdb.Encap{
+			ChassisName: chassisID,
+			IP:          strings.TrimSpace(ovnEncapIP),
+			Type:        "geneve",
+			Options:     encapOptions,
+		}
+		encaps = append(encaps, &encap)
 	}
 
 	chassis := sbdb.Chassis{
-		Name:     chassisID,
-		Hostname: node.Name,
+		Name: chassisID,
 		OtherConfig: map[string]string{
 			"is-remote": strconv.FormatBool(isRemote),
 		},
 	}
-
-	encap := sbdb.Encap{
-		ChassisName: chassisID,
-		IP:          nodePrimaryIp,
-		Type:        "geneve",
-		Options:     map[string]string{"csum": "true"},
+	if isRemote {
+		// For debugging purposes we add KAPI node name as the chassis hostname.
+		// It is not used for anything other than a helpful hint for debugging.
+		// There is no need to set it for the local node, as ovn-controller will
+		// set it automatically from the OVS external_id:hostname field.
+		chassis.Hostname = node.Name
 	}
 
-	// set the geneve port if using something else than default
-	if config.Default.EncapPort != config.DefaultEncapPort {
-		encap.Options["dst_port"] = strconv.FormatUint(uint64(config.Default.EncapPort), 10)
-	}
-
-	return libovsdbops.CreateOrUpdateChassis(zch.sbClient, &chassis, &encap)
+	return libovsdbops.CreateOrUpdateChassis(zch.sbClient, &chassis, encaps...)
 }

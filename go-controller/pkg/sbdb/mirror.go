@@ -3,7 +3,7 @@
 
 package sbdb
 
-import "github.com/ovn-org/libovsdb/model"
+import "github.com/ovn-kubernetes/libovsdb/model"
 
 const MirrorTable = "Mirror"
 
@@ -19,6 +19,7 @@ var (
 	MirrorTypeGre         MirrorType   = "gre"
 	MirrorTypeErspan      MirrorType   = "erspan"
 	MirrorTypeLocal       MirrorType   = "local"
+	MirrorTypeLport       MirrorType   = "lport"
 )
 
 // Mirror defines an object in Mirror table

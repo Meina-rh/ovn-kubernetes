@@ -12,12 +12,15 @@ import (
 	"github.com/containernetworking/cni/pkg/types"
 	"github.com/containernetworking/cni/pkg/version"
 
-	ovncnitypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/cni/types"
-	ovntypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
+	ovncnitypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/cni/types"
+	ovntypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
 )
 
 var ErrorAttachDefNotOvnManaged = errors.New("net-attach-def not managed by OVN")
 var ErrorChainingNotSupported = errors.New("CNI plugin chaining is not supported")
+
+// CNISpecVersion is the CNI spec version used when OVN-Kubernetes renders CNI config.
+const CNISpecVersion = "1.1.0"
 
 // WriteCNIConfig writes a CNI JSON config file to directory given by global config
 // if the file doesn't already exist, or is different than the content that would
@@ -25,7 +28,7 @@ var ErrorChainingNotSupported = errors.New("CNI plugin chaining is not supported
 func WriteCNIConfig() error {
 	netConf := &ovncnitypes.NetConf{
 		NetConf: types.NetConf{
-			CNIVersion: "0.4.0",
+			CNIVersion: CNISpecVersion,
 			Name:       "ovn-kubernetes",
 			Type:       CNI.Plugin,
 		},
@@ -120,10 +123,6 @@ func parseNetConfSingle(bytes []byte) (*ovncnitypes.NetConf, error) {
 }
 
 func parseNetConfList(confList *libcni.NetworkConfigList) (*ovncnitypes.NetConf, error) {
-	if len(confList.Plugins) > 1 {
-		return nil, ErrorChainingNotSupported
-	}
-
 	netconf := &ovncnitypes.NetConf{MTU: Default.MTU}
 	if err := json.Unmarshal(confList.Plugins[0].Bytes, netconf); err != nil {
 		return nil, err
@@ -132,6 +131,10 @@ func parseNetConfList(confList *libcni.NetworkConfigList) (*ovncnitypes.NetConf,
 	// skip non-OVN NAD
 	if netconf.Type != "ovn-k8s-cni-overlay" {
 		return nil, ErrorAttachDefNotOvnManaged
+	}
+
+	if len(confList.Plugins) > 1 {
+		return nil, ErrorChainingNotSupported
 	}
 
 	netconf.Name = confList.Name

@@ -14,12 +14,12 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/kubernetes/fake"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	adminpolicybasedrouteapi "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1"
-	adminpolicybasedrouteclient "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1/apis/clientset/versioned/fake"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/apbroute/gateway_info"
-	libovsdbtest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/libovsdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	adminpolicybasedrouteapi "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1"
+	adminpolicybasedrouteclient "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1/apis/clientset/versioned/fake"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/controller/apbroute/gateway_info"
+	libovsdbtest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing/libovsdb"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -201,14 +201,32 @@ var _ = Describe("OVN External Gateway namespace", func() {
 					"k8s.ovn.org/routing-network": "",
 					nettypes.NetworkStatusAnnot:   fmt.Sprintf(network_status, annotatedPodIP)},
 			},
-			Status: corev1.PodStatus{PodIPs: []corev1.PodIP{{IP: annotatedPodIP}}, Phase: corev1.PodRunning},
+			Status: corev1.PodStatus{
+				PodIPs: []corev1.PodIP{{IP: annotatedPodIP}},
+				Phase:  corev1.PodRunning,
+				Conditions: []corev1.PodCondition{
+					{
+						Type:   corev1.PodReady,
+						Status: corev1.ConditionTrue,
+					},
+				},
+			},
 		}
 
 		podGW = &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{Name: "pod", Namespace: namespaceGW.Name,
 				Labels:      map[string]string{"name": "pod"},
 				Annotations: map[string]string{nettypes.NetworkStatusAnnot: fmt.Sprintf(network_status, dynamicHopHostNetPodIP)}},
-			Status: corev1.PodStatus{PodIPs: []corev1.PodIP{{IP: dynamicHopHostNetPodIP}}, Phase: corev1.PodRunning},
+			Status: corev1.PodStatus{
+				PodIPs: []corev1.PodIP{{IP: dynamicHopHostNetPodIP}},
+				Phase:  corev1.PodRunning,
+				Conditions: []corev1.PodCondition{
+					{
+						Type:   corev1.PodReady,
+						Status: corev1.ConditionTrue,
+					},
+				},
+			},
 		}
 		namespaceTargetWithPod, namespaceTarget2WithPod, namespaceTarget2WithoutPod, namespaceGWWithPod *namespaceWithPods
 	)

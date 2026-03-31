@@ -3,15 +3,16 @@ package userdefinednetwork
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	netv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/clustermanager/userdefinednetwork/template"
-	cnitypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/cni/types"
-	ovntypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/clustermanager/userdefinednetwork/template"
+	cnitypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/cni/types"
+	ovntypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 // NetAttachDefNotInUse checks no pod is attached to given NAD.
@@ -31,6 +32,8 @@ func NetAttachDefNotInUse(nad *netv1.NetworkAttachmentDefinition, pods []*corev1
 		}
 	}
 	if len(connectedPods) > 0 {
+		// Sort the connected pods to ensure a consistent error
+		slices.Sort(connectedPods)
 		return fmt.Errorf("network in use by the following pods: %v", connectedPods)
 	}
 	return nil

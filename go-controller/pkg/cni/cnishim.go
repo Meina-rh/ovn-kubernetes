@@ -30,15 +30,16 @@ import (
 	"k8s.io/klog/v2"
 	kexec "k8s.io/utils/exec"
 
-	ovntypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/cni/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	ovntypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/cni/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 // Plugin is the structure to hold the endpoint information and the corresponding
 // functions to use it
 type Plugin struct {
 	socketPath string
+	doCNIFunc  func(url string, req interface{}) ([]byte, error)
 }
 
 // NewCNIPlugin creates the internal Plugin object
@@ -46,7 +47,9 @@ func NewCNIPlugin(socketPath string) *Plugin {
 	if len(socketPath) == 0 {
 		socketPath = serverSocketPath
 	}
-	return &Plugin{socketPath: socketPath}
+	p := &Plugin{socketPath: socketPath}
+	p.doCNIFunc = p.doCNI
+	return p
 }
 
 // Create and fill a Request with this Plugin's environment and stdin which
@@ -95,6 +98,10 @@ func (p *Plugin) doCNI(url string, req interface{}) ([]byte, error) {
 	}
 
 	if resp.StatusCode != 200 {
+		var cniErr types.Error
+		if err := json.Unmarshal(body, &cniErr); err == nil && cniErr.Code != 0 {
+			return nil, &cniErr
+		}
 		return nil, fmt.Errorf("CNI request failed with status %v: '%s'", resp.StatusCode, string(body))
 	}
 
@@ -209,7 +216,7 @@ func (p *Plugin) CmdAdd(args *skel.CmdArgs) error {
 
 	req := newCNIRequest(args, deviceInfo)
 
-	body, errB := p.doCNI("http://dummy/", req)
+	body, errB := p.doCNIFunc("http://dummy/", req)
 	if errB != nil {
 		err = errB
 		klog.Error(err.Error())
@@ -262,6 +269,16 @@ func (p *Plugin) CmdAdd(args *skel.CmdArgs) error {
 			klog.Error(err.Error())
 			return err
 		}
+		if response.PrimaryUDNPodInfo != nil {
+			primaryUDNPodRequest := response.PrimaryUDNPodReq
+			primaryUDNPodRequest.ctx, primaryUDNPodRequest.cancel = context.WithCancel(pr.ctx)
+			defer primaryUDNPodRequest.cancel()
+			err = primaryUDNCmdAddGetCNIResultFunc(result, getCNIResult, primaryUDNPodRequest, clientset, response.PrimaryUDNPodInfo)
+			if err != nil {
+				klog.Error(err.Error())
+				return err
+			}
+		}
 	}
 
 	return types.PrintResult(result, conf.CNIVersion)
@@ -278,7 +295,7 @@ func (p *Plugin) CmdDel(args *skel.CmdArgs) error {
 	defer func() {
 		p.postMetrics(startTime, CNIDel, err)
 		if err != nil {
-			klog.Errorf(err.Error())
+			klog.Errorf("Error on CmdDel: %v", err)
 		}
 	}()
 
@@ -291,7 +308,7 @@ func (p *Plugin) CmdDel(args *skel.CmdArgs) error {
 
 	var deviceInfo = nadapi.DeviceInfo{}
 	req := newCNIRequest(args, deviceInfo)
-	body, err = p.doCNI("http://dummy/", req)
+	body, err = p.doCNIFunc("http://dummy/", req)
 	if err != nil {
 		return err
 	}
@@ -299,7 +316,7 @@ func (p *Plugin) CmdDel(args *skel.CmdArgs) error {
 	response := &Response{}
 	err = json.Unmarshal(body, response)
 	if err != nil {
-		err = fmt.Errorf("cmdDel: failed to unmarshal response '%s': %v", string(body), err)
+		err = fmt.Errorf("failed to unmarshal response '%s': %v", string(body), err)
 		return err
 	}
 
@@ -324,6 +341,51 @@ func (p *Plugin) CmdDel(args *skel.CmdArgs) error {
 		err = podRequestInterfaceOps.UnconfigureInterface(pr, response.PodIFInfo)
 	}
 	return err
+}
+
+// CmdStatus is the callback for plugin readiness checks
+func (p *Plugin) CmdStatus(args *skel.CmdArgs) error {
+	var err error
+
+	startTime := time.Now()
+	defer func() {
+		p.postMetrics(startTime, CNIStatus, err)
+		if err != nil {
+			klog.Errorf("Error on CmdStatus: %v", err)
+		}
+	}()
+
+	conf, err := config.ReadCNIConfig(args.StdinData)
+	if err != nil {
+		return err
+	}
+	setupLogging(conf)
+
+	req := newCNIRequest(args, nadapi.DeviceInfo{})
+	_, err = p.doCNIFunc("http://dummy/", req)
+	return err
+}
+
+// CmdGC is the callback for runtime garbage collection.
+func (p *Plugin) CmdGC(args *skel.CmdArgs) error {
+	var err error
+
+	startTime := time.Now()
+	defer func() {
+		p.postMetrics(startTime, CNIGC, err)
+		if err != nil {
+			klog.Errorf("Error on CmdGC: %v", err)
+		}
+	}()
+
+	conf, err := config.ReadCNIConfig(args.StdinData)
+	if err != nil {
+		return err
+	}
+	setupLogging(conf)
+
+	// OVN-Kubernetes does not maintain independent local plugin state that needs GC.
+	return nil
 }
 
 // CmdCheck is the callback for 'checking' container's networking is as expected.

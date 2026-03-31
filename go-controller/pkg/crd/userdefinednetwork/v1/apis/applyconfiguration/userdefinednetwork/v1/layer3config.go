@@ -18,16 +18,34 @@ limitations under the License.
 package v1
 
 import (
-	v1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1"
+	userdefinednetworkv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1"
 )
 
 // Layer3ConfigApplyConfiguration represents a declarative configuration of the Layer3Config type for use
 // with apply.
 type Layer3ConfigApplyConfiguration struct {
-	Role        *v1.NetworkRole                  `json:"role,omitempty"`
-	MTU         *int32                           `json:"mtu,omitempty"`
-	Subnets     []Layer3SubnetApplyConfiguration `json:"subnets,omitempty"`
-	JoinSubnets *v1.DualStackCIDRs               `json:"joinSubnets,omitempty"`
+	// Role describes the network role in the pod.
+	//
+	// Allowed values are "Primary" and "Secondary".
+	// Primary network is automatically assigned to every pod created in the same namespace.
+	// Secondary network is only assigned to pods that use `k8s.v1.cni.cncf.io/networks` annotation to select given network.
+	Role *userdefinednetworkv1.NetworkRole `json:"role,omitempty"`
+	// MTU is the maximum transmission unit for a network.
+	//
+	// MTU is optional, if not provided, the globally configured value in OVN-Kubernetes (defaults to 1400) is used for the network.
+	MTU *int32 `json:"mtu,omitempty"`
+	// Subnets are used for the pod network across the cluster.
+	//
+	// Dual-stack clusters may set 2 subnets (one for each IP family), otherwise only 1 subnet is allowed.
+	// Given subnet is split into smaller subnets for every node.
+	Subnets []Layer3SubnetApplyConfiguration `json:"subnets,omitempty"`
+	// JoinSubnets are used inside the OVN network topology.
+	//
+	// Dual-stack clusters may set 2 subnets (one for each IP family), otherwise only 1 subnet is allowed.
+	// This field is only allowed for "Primary" network.
+	// It is not recommended to set this field without explicit need and understanding of the OVN network topology.
+	// When omitted, the platform will choose a reasonable default which is subject to change over time.
+	JoinSubnets *userdefinednetworkv1.DualStackCIDRs `json:"joinSubnets,omitempty"`
 }
 
 // Layer3ConfigApplyConfiguration constructs a declarative configuration of the Layer3Config type for use with
@@ -39,7 +57,7 @@ func Layer3Config() *Layer3ConfigApplyConfiguration {
 // WithRole sets the Role field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the Role field is set to the value of the last call.
-func (b *Layer3ConfigApplyConfiguration) WithRole(value v1.NetworkRole) *Layer3ConfigApplyConfiguration {
+func (b *Layer3ConfigApplyConfiguration) WithRole(value userdefinednetworkv1.NetworkRole) *Layer3ConfigApplyConfiguration {
 	b.Role = &value
 	return b
 }
@@ -68,7 +86,7 @@ func (b *Layer3ConfigApplyConfiguration) WithSubnets(values ...*Layer3SubnetAppl
 // WithJoinSubnets sets the JoinSubnets field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the JoinSubnets field is set to the value of the last call.
-func (b *Layer3ConfigApplyConfiguration) WithJoinSubnets(value v1.DualStackCIDRs) *Layer3ConfigApplyConfiguration {
+func (b *Layer3ConfigApplyConfiguration) WithJoinSubnets(value userdefinednetworkv1.DualStackCIDRs) *Layer3ConfigApplyConfiguration {
 	b.JoinSubnets = &value
 	return b
 }

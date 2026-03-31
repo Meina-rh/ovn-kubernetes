@@ -8,12 +8,12 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
-	libovsdbtest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/libovsdb"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	libovsdbtest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing/libovsdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 type lrpSync struct {
@@ -122,7 +122,7 @@ var _ = ginkgo.Describe("OVN Logical Router Syncer", func() {
 					map[string]string{"name": egressIPName},
 					defaultNetworkControllerName)},
 				finalLRPs: []*nbdb.LogicalRouterPolicy{getReRouteLRP(podNamespace, podName, v4PodIPStr, 0, v4IPFamilyValue, v4PodNextHops,
-					map[string]string{"name": egressIPName},
+					getEgressIPLRPReRouteDbIDs(egressIPName, "UNKNOWN", "UNKNOWN", v4IPFamilyValue, defaultNetworkName, defaultNetworkControllerName).GetExternalIDs(),
 					defaultNetworkControllerName)},
 				v4ClusterSubnets: []*net.IPNet{v4PodClusterSubnet},
 				v4JoinSubnet:     v4JoinSubnet,

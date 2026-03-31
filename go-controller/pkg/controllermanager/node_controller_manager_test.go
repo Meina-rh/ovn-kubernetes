@@ -1,28 +1,30 @@
 package controllermanager
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/containernetworking/plugins/pkg/testutils"
 	"github.com/stretchr/testify/mock"
+	"github.com/vishvananda/netlink"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	factoryMocks "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory/mocks"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/routemanager"
-	ovntest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing"
-	nadinformermocks "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/mocks/github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/informers/externalversions/k8s.cni.cncf.io/v1"
-	nadlistermocks "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/mocks/github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/listers/k8s.cni.cncf.io/v1"
-	coreinformermocks "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/mocks/k8s.io/client-go/informers/core/v1"
-	corelistermocks "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/mocks/k8s.io/client-go/listers/core/v1"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	factoryMocks "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory/mocks"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/routemanager"
+	ovntest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing"
+	nadinformermocks "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing/mocks/github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/informers/externalversions/k8s.cni.cncf.io/v1"
+	nadlistermocks "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing/mocks/github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/listers/k8s.cni.cncf.io/v1"
+	coreinformermocks "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing/mocks/k8s.io/client-go/informers/core/v1"
+	corelistermocks "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing/mocks/k8s.io/client-go/listers/core/v1"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -60,6 +62,7 @@ var _ = Describe("Healthcheck tests", func() {
 	var err error
 
 	BeforeEach(func() {
+		Expect(config.PrepareTestConfig()).To(Succeed())
 		execMock = ovntest.NewFakeExec()
 		Expect(util.SetExec(execMock)).To(Succeed())
 		factoryMock = factoryMocks.NodeWatchFactory{}
@@ -136,10 +139,19 @@ var _ = Describe("Healthcheck tests", func() {
 
 		BeforeEach(func() {
 			// setup kube output
-			factoryMock.On("NADInformer").Return(nil)
-			ncm, err = NewNodeControllerManager(fakeClient, &factoryMock, nodeName, &sync.WaitGroup{}, nil, routeManager)
-			Expect(err).NotTo(HaveOccurred())
 			factoryMock.On("GetPods", "").Return(podList, nil)
+			nadListerMock := &nadlistermocks.NetworkAttachmentDefinitionLister{}
+			nadInformerMock := &nadinformermocks.NetworkAttachmentDefinitionInformer{}
+			nadInformerMock.On("Lister").Return(nadListerMock)
+			nadInformerMock.On("Informer").Return(nil)
+			factoryMock.On("NADInformer").Return(nadInformerMock)
+			nodeInformerMock := &coreinformermocks.NodeInformer{}
+			nodeListerMock := &corelistermocks.NodeLister{}
+			nodeListerMock.On("List", mock.Anything).Return(nil, nil)
+			nodeInformerMock.On("Lister").Return(nodeListerMock)
+			factoryMock.On("NodeCoreInformer").Return(nodeInformerMock)
+			ncm, err = NewNodeControllerManager(fakeClient, &factoryMock, nodeName, &sync.WaitGroup{}, nil, routeManager, nil)
+			Expect(err).NotTo(HaveOccurred())
 		})
 
 		Context("bridge has stale representor ports", func() {
@@ -181,9 +193,9 @@ var _ = Describe("Healthcheck tests", func() {
 
 	Context("verify cleanup of deleted networks", func() {
 		var (
-			staleNetID uint   = 1000
-			nodeName   string = "worker1"
-			nad               = ovntest.GenerateNAD("bluenet", "rednad", "greenamespace",
+			staleNetID uint = 1000
+			nodeName        = "worker1"
+			nad             = ovntest.GenerateNAD("bluenet", "rednad", "greenamespace",
 				types.Layer3Topology, "100.128.0.0/16", types.NetworkRolePrimary)
 			netName      = "bluenet"
 			netID        = 1003
@@ -228,7 +240,7 @@ var _ = Describe("Healthcheck tests", func() {
 				},
 			}
 			nodeList := []*corev1.Node{node}
-			factoryMock.On("GetNode", nodeName).Return(nodeList[0], nil)
+			factoryMock.On("GetNodeForWindows", nodeName).Return(nodeList[0], nil)
 			factoryMock.On("GetNodes").Return(nodeList, nil)
 			factoryMock.On("UserDefinedNetworkInformer").Return(nil)
 			factoryMock.On("ClusterUserDefinedNetworkInformer").Return(nil)
@@ -244,7 +256,7 @@ var _ = Describe("Healthcheck tests", func() {
 			nodeInformerMock.On("Lister").Return(nodeListerMock)
 			factoryMock.On("NodeCoreInformer").Return(nodeInformerMock)
 
-			ncm, err := NewNodeControllerManager(fakeClient, &factoryMock, nodeName, &sync.WaitGroup{}, nil, routeManager)
+			ncm, err := NewNodeControllerManager(fakeClient, &factoryMock, nodeName, &sync.WaitGroup{}, nil, routeManager, nil)
 			Expect(err).NotTo(HaveOccurred())
 
 			err = testNS.Do(func(ns.NetNS) error {
@@ -273,6 +285,78 @@ var _ = Describe("Healthcheck tests", func() {
 				// Verify CleanupDeletedNetworks didn't cleanup VRF configuration for
 				// existing network.
 				_, err = util.GetNetLinkOps().LinkByName(validVrfDevice)
+				Expect(err).NotTo(HaveOccurred())
+
+				return nil
+			})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		ovntest.OnSupportedPlatformsIt("check stale mpx devices are cleaned for deleted networks", func() {
+			config.OVNKubernetesFeature.EnableNetworkSegmentation = true
+			config.OVNKubernetesFeature.EnableMultiNetwork = true
+
+			staleMgtPort := fmt.Sprintf("%s%d", types.K8sMgmtIntfNamePrefix, staleNetID)
+			fexec := ovntest.NewFakeExec()
+			Expect(util.SetExec(fexec)).To(Succeed())
+			fexec.AddFakeCmdsNoOutputNoError([]string{
+				"ovs-vsctl --timeout=15" +
+					" --if-exists del-port br-int " + staleMgtPort,
+			})
+			factoryMock := factoryMocks.NodeWatchFactory{}
+			netInfo, err := util.ParseNADInfo(nad)
+			mutableNetInfo := util.NewMutableNetInfo(netInfo)
+			Expect(err).NotTo(HaveOccurred())
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: nodeName,
+					Annotations: map[string]string{
+						"k8s.ovn.org/network-ids":  fmt.Sprintf("{\"%s\": \"%d\"}", netName, netID),
+						"k8s.ovn.org/node-subnets": fmt.Sprintf("{\"%s\":[\"%s\", \"%s\"]}", netName, v4NodeSubnet, v6NodeSubnet)},
+				},
+			}
+			nodeList := []*corev1.Node{node}
+			factoryMock.On("GetNodeForWindows", nodeName).Return(nodeList[0], nil)
+			factoryMock.On("GetNodes").Return(nodeList, nil)
+			factoryMock.On("UserDefinedNetworkInformer").Return(nil)
+			factoryMock.On("ClusterUserDefinedNetworkInformer").Return(nil)
+			factoryMock.On("NamespaceInformer").Return(nil)
+			nadListerMock := &nadlistermocks.NetworkAttachmentDefinitionLister{}
+			nadInformerMock := &nadinformermocks.NetworkAttachmentDefinitionInformer{}
+			nadInformerMock.On("Lister").Return(nadListerMock)
+			nadInformerMock.On("Informer").Return(nil)
+			factoryMock.On("NADInformer").Return(nadInformerMock)
+			nodeListerMock := &corelistermocks.NodeLister{}
+			nodeListerMock.On("List", mock.Anything).Return(nodeList, nil)
+			nodeInformerMock := &coreinformermocks.NodeInformer{}
+			nodeInformerMock.On("Lister").Return(nodeListerMock)
+			factoryMock.On("NodeCoreInformer").Return(nodeInformerMock)
+			Expect(err).NotTo(HaveOccurred())
+			ncm, err := NewNodeControllerManager(fakeClient, &factoryMock, nodeName, &sync.WaitGroup{}, nil, routeManager, nil)
+			Expect(err).NotTo(HaveOccurred())
+
+			err = testNS.Do(func(ns.NetNS) error {
+				defer GinkgoRecover()
+				By("Add stale kernel mpx interface")
+				ovntest.AddLink(staleMgtPort)
+
+				By("Add active UDN kernel mpx interface")
+				validMgtPort := fmt.Sprintf("%s%d", types.K8sMgmtIntfNamePrefix, netID)
+				ovntest.AddLink(validMgtPort)
+
+				mutableNetInfo.SetNetworkID(int(netID))
+
+				By("Cleaning up stale networks")
+				err = ncm.CleanupStaleNetworks(mutableNetInfo)
+				Expect(err).NotTo(HaveOccurred())
+
+				By("Stale mpx interface should have been removed")
+				_, err = util.GetNetLinkOps().LinkByName(staleMgtPort)
+				var notFoundErr netlink.LinkNotFoundError
+				Expect(errors.As(err, &notFoundErr)).To(BeTrue())
+
+				By("Valid mpx interface should NOT have been removed")
+				_, err = util.GetNetLinkOps().LinkByName(validMgtPort)
 				Expect(err).NotTo(HaveOccurred())
 
 				return nil

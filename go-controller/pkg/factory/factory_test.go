@@ -29,16 +29,19 @@ import (
 	anpapi "sigs.k8s.io/network-policy-api/apis/v1alpha1"
 	anpapifake "sigs.k8s.io/network-policy-api/pkg/client/clientset/versioned/fake"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	egressfirewall "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1"
-	egressfirewallfake "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/clientset/versioned/fake"
-	egressip "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
-	egressipfake "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/clientset/versioned/fake"
-	egressqos "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1"
-	egressqosfake "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/clientset/versioned/fake"
-	egressservice "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1"
-	egressservicefake "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1/apis/clientset/versioned/fake"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	egressfirewall "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1"
+	egressfirewallfake "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/clientset/versioned/fake"
+	egressip "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
+	egressipfake "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/clientset/versioned/fake"
+	egressqos "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1"
+	egressqosfake "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/clientset/versioned/fake"
+	egressservice "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1"
+	egressservicefake "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1/apis/clientset/versioned/fake"
+	networkqos "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/networkqos/v1alpha1"
+	networkqosfake "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/networkqos/v1alpha1/apis/clientset/versioned/fake"
+	crdtypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -223,6 +226,45 @@ func newIPAMClaim(name string) *ipamclaimsapi.IPAMClaim {
 	}
 }
 
+func newNetworkQoS(name, namespace string) *networkqos.NetworkQoS {
+	return &networkqos.NetworkQoS{
+		ObjectMeta: newObjectMeta(name, namespace),
+		Spec: networkqos.Spec{
+			NetworkSelectors: []crdtypes.NetworkSelector{
+				{
+					NetworkSelectionType: crdtypes.NetworkAttachmentDefinitions,
+					NetworkAttachmentDefinitionSelector: &crdtypes.NetworkAttachmentDefinitionSelector{
+						NetworkSelector: metav1.LabelSelector{
+							MatchLabels: map[string]string{
+								"name": "stream",
+							},
+						},
+					},
+				},
+			},
+			Priority: 100,
+			Egress: []networkqos.Rule{
+				{
+					DSCP: 50,
+					Classifier: networkqos.Classifier{
+						To: []networkqos.Destination{
+							{
+								IPBlock: &knet.IPBlock{
+									CIDR: "1.2.3.4/32",
+								},
+							},
+						},
+					},
+					Bandwidth: networkqos.Bandwidth{
+						Rate:  20000,
+						Burst: 10,
+					},
+				},
+			},
+		},
+	}
+}
+
 func objSetup(c *fake.Clientset, objType string, listFn func(core.Action) (bool, runtime.Object, error)) *watch.FakeWatcher {
 	w := watch.NewFake()
 	c.AddWatchReactor(objType, core.DefaultWatchReactor(w, nil))
@@ -279,6 +321,13 @@ func ipamClaimsObjSetup(c *ipamclaimsapifake.Clientset, objType string, listFn f
 	return w
 }
 
+func networkQoSObjSetup(c *networkqosfake.Clientset, objType string, listFn func(core.Action) (bool, runtime.Object, error)) *watch.FakeWatcher {
+	w := watch.NewFake()
+	c.AddWatchReactor(objType, core.DefaultWatchReactor(w, nil))
+	c.AddReactor("list", objType, listFn)
+	return w
+}
+
 type handlerCalls struct {
 	added   int32
 	updated int32
@@ -310,6 +359,7 @@ var _ = Describe("Watch Factory Operations", func() {
 		adminNetworkPolicyFakeClient        *anpapifake.Clientset
 		ipamClaimsFakeClient                *ipamclaimsapifake.Clientset
 		nadsFakeClient                      *nadsfake.Clientset
+		networkQoSFakeClient                *networkqosfake.Clientset
 		podWatch, namespaceWatch, nodeWatch *watch.FakeWatcher
 		policyWatch, serviceWatch           *watch.FakeWatcher
 		endpointSliceWatch                  *watch.FakeWatcher
@@ -321,6 +371,7 @@ var _ = Describe("Watch Factory Operations", func() {
 		adminNetPolWatch                    *watch.FakeWatcher
 		baselineAdminNetPolWatch            *watch.FakeWatcher
 		ipamClaimsWatch                     *watch.FakeWatcher
+		networkQoSWatch                     *watch.FakeWatcher
 		pods                                []*corev1.Pod
 		namespaces                          []*corev1.Namespace
 		nodes                               []*corev1.Node
@@ -336,6 +387,7 @@ var _ = Describe("Watch Factory Operations", func() {
 		adminNetworkPolicies                []*anpapi.AdminNetworkPolicy
 		baselineAdminNetworkPolicies        []*anpapi.BaselineAdminNetworkPolicy
 		ipamClaims                          []*ipamclaimsapi.IPAMClaim
+		networkQoSes                        []*networkqos.NetworkQoS
 		err                                 error
 		shutdown                            bool
 	)
@@ -355,6 +407,7 @@ var _ = Describe("Watch Factory Operations", func() {
 		config.OVNKubernetesFeature.EnableAdminNetworkPolicy = true
 		config.OVNKubernetesFeature.EnableMultiNetwork = true
 		config.OVNKubernetesFeature.EnablePersistentIPs = true
+		config.OVNKubernetesFeature.EnableNetworkQoS = true
 		config.Kubernetes.PlatformType = string(ocpconfigapi.AWSPlatformType)
 
 		fakeClient = &fake.Clientset{}
@@ -366,6 +419,7 @@ var _ = Describe("Watch Factory Operations", func() {
 		adminNetworkPolicyFakeClient = &anpapifake.Clientset{}
 		ipamClaimsFakeClient = &ipamclaimsapifake.Clientset{}
 		nadsFakeClient = &nadsfake.Clientset{}
+		networkQoSFakeClient = &networkqosfake.Clientset{}
 
 		ovnClientset = &util.OVNMasterClientset{
 			KubeClient:            fakeClient,
@@ -377,6 +431,7 @@ var _ = Describe("Watch Factory Operations", func() {
 			EgressServiceClient:   egressServiceFakeClient,
 			IPAMClaimsClient:      ipamClaimsFakeClient,
 			NetworkAttchDefClient: nadsFakeClient,
+			NetworkQoSClient:      networkQoSFakeClient,
 		}
 		ovnCMClientset = &util.OVNClusterManagerClientset{
 			KubeClient:            fakeClient,
@@ -513,6 +568,16 @@ var _ = Describe("Watch Factory Operations", func() {
 			}
 			return true, obj, nil
 		})
+
+		networkQoSes = make([]*networkqos.NetworkQoS, 0)
+		networkQoSWatch = networkQoSObjSetup(networkQoSFakeClient, "networkqoses", func(core.Action) (bool, runtime.Object, error) {
+			obj := &networkqos.NetworkQoSList{}
+			for _, p := range networkQoSes {
+				obj.Items = append(obj.Items, *p)
+			}
+			return true, obj, nil
+		})
+
 		shutdown = false
 	})
 
@@ -592,22 +657,10 @@ var _ = Describe("Watch Factory Operations", func() {
 			testExisting(PolicyType, "", nil, defaultHandlerPriority)
 		})
 
-		It("is called for each existing policy: AddressSetPodSelectorType", func() {
-			policies = append(policies, newPolicy("denyall", "default"))
-			pods = append(pods, newPod("pod1", "default"))
-			testExistingFilteredHandler(PodType, AddressSetPodSelectorType, "default", nil, 2)
-		})
-
 		It("is called for each existing policy: LocalPodSelectorType", func() {
 			policies = append(policies, newPolicy("denyall", "default"))
 			pods = append(pods, newPod("pod1", "default"))
 			testExistingFilteredHandler(PodType, LocalPodSelectorType, "default", nil, 3)
-		})
-
-		It("is called for each existing policy: AddressSetNamespaceAndPodSelectorType", func() {
-			policies = append(policies, newPolicy("denyall", "default"))
-			pods = append(pods, newPod("pod1", "default"))
-			testExistingFilteredHandler(NamespaceType, AddressSetNamespaceAndPodSelectorType, "default", nil, 3)
 		})
 
 		It("is called for each existing policy: PeerNamespaceSelectorType", func() {
@@ -672,6 +725,10 @@ var _ = Describe("Watch Factory Operations", func() {
 		It("is called for each existing IPAMClaim", func() {
 			ipamClaims = append(ipamClaims, newIPAMClaim("claim!"))
 			testExisting(IPAMClaimsType, "", nil, defaultHandlerPriority)
+		})
+		It("is called for each existing networkQoS", func() {
+			networkQoSes = append(networkQoSes, newNetworkQoS("myNetworkQoS", "default"))
+			testExisting(NetworkQoSType, "", nil, defaultHandlerPriority)
 		})
 
 		It("is called for each existing pod that matches a given namespace and label", func() {
@@ -787,6 +844,12 @@ var _ = Describe("Watch Factory Operations", func() {
 			baselineAdminNetworkPolicies = append(baselineAdminNetworkPolicies, newBaselineAdminNetworkPolicy("myBANP2"))
 			testExisting(BaselineAdminNetworkPolicyType)
 		})
+		It("calls ADD for each existing networkQoS", func() {
+			networkQoSes = append(networkQoSes, newNetworkQoS("myNetworkQoS", "default"))
+			networkQoSes = append(networkQoSes, newNetworkQoS("myNetworkQoS1", "default"))
+			testExisting(NetworkQoSType)
+		})
+
 		It("doesn't deadlock when factory is shutdown", func() {
 			// every queue has length 10, but some events may be handled before the stop channel event is selected,
 			// so multiply by 15 instead of 10 to ensure overflow
@@ -891,6 +954,20 @@ var _ = Describe("Watch Factory Operations", func() {
 		It("does not contain IPAMClaims informer", func() {
 			config.OVNKubernetesFeature.EnablePersistentIPs = false
 			testExisting(IPAMClaimsType)
+		})
+	})
+
+	Context("when NetworkQoS is disabled", func() {
+		testExisting := func(objType reflect.Type) {
+			wf, err = NewMasterWatchFactory(ovnClientset)
+			Expect(err).NotTo(HaveOccurred())
+			err = wf.Start()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(wf.informers).NotTo(HaveKey(objType))
+		}
+		It("does not contain NetworkQoS informer", func() {
+			config.OVNKubernetesFeature.EnableNetworkQoS = false
+			testExisting(NetworkQoSType)
 		})
 	})
 
@@ -1449,7 +1526,7 @@ var _ = Describe("Watch Factory Operations", func() {
 				// Expect updates to be processed after Add
 				ot.mu.Lock()
 				defer ot.mu.Unlock()
-				Expect(ot.added).To(Equal(4), "update for EIP namespace %s processed before add was processed in all handlers!", newNamespace.Name)
+				Expect(ot.added).To(Equal(8), "update for EIP namespace %s processed before add was processed in all handlers!", newNamespace.Name)
 				Expect(ot.updated).To(Equal(0))
 				ot.updated++
 				Expect(newNamespace.Status.Phase).To(Equal(corev1.NamespaceActive))
@@ -1462,10 +1539,10 @@ var _ = Describe("Watch Factory Operations", func() {
 				// Verify that deletes were processed after the updates and adds
 				ot.mu.Lock()
 				defer ot.mu.Unlock()
-				Expect(ot.added).To(Equal(4), "delete for EIP namespace %s processed before add was processed in all handlers!", newNamespace.Name)
-				Expect(ot.updated).To(Equal(4), "delete for EIP namespace %s processed before update was processed in all handlers!", newNamespace.Name)
-				Expect(ot.deleted).To(Equal(8))
-				ot.deleted = ot.deleted / 2
+				Expect(ot.added).To(Equal(8), "delete for EIP namespace %s processed before add was processed in all handlers!", newNamespace.Name)
+				Expect(ot.updated).To(Equal(8), "delete for EIP namespace %s processed before update was processed in all handlers!", newNamespace.Name)
+				Expect(ot.deleted).To(Equal(10))
+				ot.deleted = ot.deleted - 2
 				Expect(newNamespace.Status.Phase).To(Equal(corev1.NamespaceTerminating))
 			},
 		})
@@ -1490,7 +1567,7 @@ var _ = Describe("Watch Factory Operations", func() {
 				// Expect updates to be processed after Add
 				ot.mu.Lock()
 				defer ot.mu.Unlock()
-				Expect(ot.added).To(Equal(4), "update for EIP namespace %s processed before add was processed in all handlers!", newNamespace.Name)
+				Expect(ot.added).To(Equal(8), "update for EIP namespace %s processed before add was processed in all handlers!", newNamespace.Name)
 				Expect(ot.updated).To(Equal(1), "update for EIP namespace %s processed before initial namespace update!", newNamespace.Name)
 				ot.updated = ot.updated * 10
 				Expect(newNamespace.Status.Phase).To(Equal(corev1.NamespaceActive))
@@ -1503,10 +1580,10 @@ var _ = Describe("Watch Factory Operations", func() {
 				// Verify that deletes were processed after the updates and adds
 				ot.mu.Lock()
 				defer ot.mu.Unlock()
-				Expect(ot.added).To(Equal(4), "delete for EIP namespace %s processed before add was processed in all handlers!", newNamespace.Name)
-				Expect(ot.updated).To(Equal(4), "delete for EIP namespace %s processed before update was processed in all handlers!", newNamespace.Name)
-				Expect(ot.deleted).To(Equal(10))
-				ot.deleted = ot.deleted - 2
+				Expect(ot.added).To(Equal(8), "delete for EIP namespace %s processed before add was processed in all handlers!", newNamespace.Name)
+				Expect(ot.updated).To(Equal(8), "delete for EIP namespace %s processed before update was processed in all handlers!", newNamespace.Name)
+				Expect(ot.deleted).To(Equal(1))
+				ot.deleted = ot.deleted * 10
 				Expect(newNamespace.Status.Phase).To(Equal(corev1.NamespaceTerminating))
 			},
 		})
@@ -1530,7 +1607,7 @@ var _ = Describe("Watch Factory Operations", func() {
 				// Expect updates to be processed after Add
 				ot.mu.Lock()
 				defer ot.mu.Unlock()
-				Expect(ot.added).To(Equal(4), "update for EIP namespace %s processed before add was processed in all handlers!", newNamespace.Name)
+				Expect(ot.added).To(Equal(8), "update for EIP namespace %s processed before add was processed in all handlers!", newNamespace.Name)
 				Expect(ot.updated).To(Equal(10), "update for peer namespace %s processed before EIP namespace update!", newNamespace.Name)
 				ot.updated = ot.updated - 2
 				Expect(newNamespace.Status.Phase).To(Equal(corev1.NamespaceActive))
@@ -1543,48 +1620,8 @@ var _ = Describe("Watch Factory Operations", func() {
 				// Verify that deletes were processed after the updates and adds
 				ot.mu.Lock()
 				defer ot.mu.Unlock()
-				Expect(ot.added).To(Equal(4), "delete for EIP namespace %s processed before add was processed in all handlers!", newNamespace.Name)
-				Expect(ot.updated).To(Equal(4), "delete for EIP namespace %s processed before update was processed in all handlers!", newNamespace.Name)
-				Expect(ot.deleted).To(Equal(1))
-				ot.deleted = ot.deleted * 10
-				Expect(newNamespace.Status.Phase).To(Equal(corev1.NamespaceTerminating))
-			},
-		})
-		peerpodnsh, c4 := addPriorityHandler(wf, NamespaceType, AddressSetNamespaceAndPodSelectorType, cache.ResourceEventHandlerFuncs{
-			AddFunc: func(obj interface{}) {
-				defer GinkgoRecover()
-				namespace := obj.(*corev1.Namespace)
-				ot, ok := testNamespaces[namespace.Name]
-				Expect(ok).To(BeTrue())
-				ot.mu.Lock()
-				defer ot.mu.Unlock()
-				Expect(ot.added).To(Equal(8), "add for peerPod namespace %s processed before peer namespace add!", namespace.Name)
-				ot.added = ot.added / 2
-				Expect(namespace.Status.Phase).To(BeEmpty())
-			},
-			UpdateFunc: func(_, new interface{}) {
-				defer GinkgoRecover()
-				newNamespace := new.(*corev1.Namespace)
-				ot, ok := testNamespaces[newNamespace.Name]
-				Expect(ok).To(BeTrue())
-				// Expect updates to be processed after Add
-				ot.mu.Lock()
-				defer ot.mu.Unlock()
-				Expect(ot.added).To(Equal(4), "update for peerPod namespace %s processed before peerPod namespace add!", newNamespace.Name)
-				Expect(ot.updated).To(Equal(8), "update for peerPod namespace %s processed before peer namespace update!", newNamespace.Name)
-				ot.updated = ot.updated / 2
-				Expect(newNamespace.Status.Phase).To(Equal(corev1.NamespaceActive))
-			},
-			DeleteFunc: func(obj interface{}) {
-				defer GinkgoRecover()
-				newNamespace := obj.(*corev1.Namespace)
-				ot, ok := testNamespaces[newNamespace.Name]
-				Expect(ok).To(BeTrue())
-				// Verify that deletes were processed after the updates and adds
-				ot.mu.Lock()
-				defer ot.mu.Unlock()
-				Expect(ot.added).To(Equal(4), "delete for EIP namespace %s processed before add was processed in all handlers!", newNamespace.Name)
-				Expect(ot.updated).To(Equal(4), "delete for EIP namespace %s processed before update was processed in all handlers!", newNamespace.Name)
+				Expect(ot.added).To(Equal(8), "delete for EIP namespace %s processed before add was processed in all handlers!", newNamespace.Name)
+				Expect(ot.updated).To(Equal(8), "delete for EIP namespace %s processed before update was processed in all handlers!", newNamespace.Name)
 				Expect(ot.deleted).To(Equal(0))
 				ot.deleted++
 				Expect(newNamespace.Status.Phase).To(Equal(corev1.NamespaceTerminating))
@@ -1603,25 +1640,23 @@ var _ = Describe("Watch Factory Operations", func() {
 		// Adds are done synchronously at handler addition time
 		for _, ot := range testNamespaces {
 			ot.mu.Lock()
-			// ((((0 + 1) * 10) - 2) / 2) = 4
-			Expect(ot.added).To(Equal(4), "missing add for namespace %s", ot.namespace.Name)
+			// (((0 + 1) * 10) - 2) = 8
+			Expect(ot.added).To(Equal(8), "missing add for namespace %s", ot.namespace.Name)
 			ot.mu.Unlock()
 		}
 		Expect(c1.getAdded()).To(Equal(len(testNamespaces)))
 		Expect(c2.getAdded()).To(Equal(len(testNamespaces)))
 		Expect(c3.getAdded()).To(Equal(len(testNamespaces)))
-		Expect(c4.getAdded()).To(Equal(len(testNamespaces)))
 		<-done
 		// Updates are async and may take a bit longer to finish
 		Eventually(c1.getUpdated, 10).Should(Equal(len(testNamespaces)))
 		Eventually(c2.getUpdated, 10).Should(Equal(len(testNamespaces)))
 		Eventually(c3.getUpdated, 10).Should(Equal(len(testNamespaces)))
-		Eventually(c4.getUpdated, 10).Should(Equal(len(testNamespaces)))
 
 		for _, ot := range testNamespaces {
 			ot.mu.Lock()
-			// ((((0 + 1) * 10) - 2) / 2) = 4
-			Expect(ot.updated).To(Equal(4), "missing update for namespace %s", ot.namespace.Name)
+			// (((0 + 1) * 10) - 2) = 8
+			Expect(ot.updated).To(Equal(8), "missing update for namespace %s", ot.namespace.Name)
 			ot.mu.Unlock()
 		}
 
@@ -1638,19 +1673,17 @@ var _ = Describe("Watch Factory Operations", func() {
 		Eventually(c1.getDeleted, 10).Should(Equal(len(testNamespaces)))
 		Eventually(c2.getDeleted, 10).Should(Equal(len(testNamespaces)))
 		Eventually(c3.getDeleted, 10).Should(Equal(len(testNamespaces)))
-		Eventually(c4.getDeleted, 10).Should(Equal(len(testNamespaces)))
 
 		for _, ot := range testNamespaces {
 			ot.mu.Lock()
-			// ((((0 + 1) * 10) - 2) / 2) = 4
-			Expect(ot.deleted).To(Equal(4), "missing delete for namespace %s", ot.namespace.Name)
+			// (((0 + 1) * 10) - 2) = 8
+			Expect(ot.deleted).To(Equal(8), "missing delete for namespace %s", ot.namespace.Name)
 			ot.mu.Unlock()
 		}
 
 		wf.RemoveNamespaceHandler(nsh)
 		wf.RemoveNamespaceHandler(eipnsh)
 		wf.RemoveNamespaceHandler(peernsh)
-		wf.RemoveNamespaceHandler(peerpodnsh)
 	})
 
 	It("responds to policy add/update/delete events", func() {
@@ -2062,6 +2095,43 @@ var _ = Describe("Watch Factory Operations", func() {
 
 		wf.RemoveIPAMClaimsHandler(h)
 	})
+
+	It("responds to networkQoS add/update/delete events", func() {
+		wf, err = NewMasterWatchFactory(ovnClientset)
+		Expect(err).NotTo(HaveOccurred())
+		err = wf.Start()
+		Expect(err).NotTo(HaveOccurred())
+
+		added := newNetworkQoS("myNetworkQoS", "default")
+		h, c := addHandler(wf, NetworkQoSType, cache.ResourceEventHandlerFuncs{
+			AddFunc: func(obj interface{}) {
+				networkQoS := obj.(*networkqos.NetworkQoS)
+				Expect(reflect.DeepEqual(networkQoS, added)).To(BeTrue())
+			},
+			UpdateFunc: func(_, new interface{}) {
+				newNetworkQoS := new.(*networkqos.NetworkQoS)
+				Expect(reflect.DeepEqual(newNetworkQoS, added)).To(BeTrue())
+				Expect(newNetworkQoS.Spec.Egress[0].DSCP).To(Equal(42))
+			},
+			DeleteFunc: func(obj interface{}) {
+				networkQoS := obj.(*networkqos.NetworkQoS)
+				Expect(reflect.DeepEqual(networkQoS, added)).To(BeTrue())
+			},
+		})
+
+		networkQoSes = append(networkQoSes, added)
+		networkQoSWatch.Add(added)
+		Eventually(c.getAdded, 2).Should(Equal(1))
+		added.Spec.Egress[0].DSCP = 42
+		networkQoSWatch.Modify(added)
+		Eventually(c.getUpdated, 2).Should(Equal(1))
+		networkQoSes = networkQoSes[:0]
+		networkQoSWatch.Delete(added)
+		Eventually(c.getDeleted, 2).Should(Equal(1))
+
+		wf.RemoveNetworkQoSHandler(h)
+	})
+
 	It("stops processing events after the handler is removed", func() {
 		wf, err = NewMasterWatchFactory(ovnClientset)
 		Expect(err).NotTo(HaveOccurred())

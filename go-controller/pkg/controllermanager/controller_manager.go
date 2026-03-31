@@ -2,35 +2,43 @@ package controllermanager
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/containernetworking/cni/pkg/types"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 
-	libovsdbclient "github.com/ovn-org/libovsdb/client"
+	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
 
-	ovncnitypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/cni/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
-	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
-	libovsdbutil "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/util"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/metrics"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/networkmanager"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/observability"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn"
-	addressset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/address_set"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/udnenabledsvc"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/routeimport"
-	ovntypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	ovncnitypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/cni/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	nodecontroller "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/controllers/node"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/kube"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	libovsdbutil "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/metrics"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/metrics/recorders"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/networkmanager"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/observability"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn"
+	addressset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/address_set"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/addresssetmanager"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/controller/udnenabledsvc"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/routeimport"
+	ovntypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 // ControllerManager structure is the object manages all controllers
@@ -45,8 +53,6 @@ type ControllerManager struct {
 	nbClient libovsdbclient.Client
 	// libovsdb southbound client interface
 	sbClient libovsdbclient.Client
-	// has SCTP support
-	SCTPSupport bool
 	// Supports multicast?
 	multicastSupport bool
 	// Supports OVN Template Load Balancers?
@@ -60,14 +66,17 @@ type ControllerManager struct {
 	// networkManager creates and deletes network controllers
 	networkManager     networkmanager.Controller
 	routeImportManager routeimport.Controller
+	udnNodeController  *nodecontroller.NodeController
 
 	// eIPController programs OVN to support EgressIP
 	eIPController *ovn.EgressIPController
+
+	addressSetManager *addresssetmanager.AddressSetManager
 }
 
 func (cm *ControllerManager) NewNetworkController(nInfo util.NetInfo) (networkmanager.NetworkController, error) {
 	// Pass a shallow clone of the watch factory, this allows multiplexing
-	// informers for secondary networks.
+	// informers for user-defined networks.
 	cnci, err := cm.newCommonNetworkControllerInfo(cm.watchFactory.ShallowClone())
 	if err != nil {
 		return nil, fmt.Errorf("failed to create network controller info %w", err)
@@ -75,62 +84,83 @@ func (cm *ControllerManager) NewNetworkController(nInfo util.NetInfo) (networkma
 	topoType := nInfo.TopologyType()
 	switch topoType {
 	case ovntypes.Layer3Topology:
-		return ovn.NewSecondaryLayer3NetworkController(cnci, nInfo, cm.networkManager.Interface(), cm.eIPController, cm.portCache)
+		oc, err := ovn.NewLayer3UserDefinedNetworkController(cnci, nInfo, cm.networkManager.Interface(), cm.routeImportManager,
+			cm.eIPController, cm.portCache, cm.addressSetManager, cm.udnNodeController)
+		if err != nil {
+			return nil, err
+		}
+		return oc, nil
 	case ovntypes.Layer2Topology:
-		return ovn.NewSecondaryLayer2NetworkController(cnci, nInfo, cm.networkManager.Interface(), cm.eIPController, cm.portCache)
+		oc, err := ovn.NewLayer2UserDefinedNetworkController(cnci, nInfo, cm.networkManager.Interface(), cm.routeImportManager,
+			cm.portCache, cm.eIPController, cm.addressSetManager, cm.udnNodeController)
+		if err != nil {
+			return nil, err
+		}
+		return oc, nil
 	case ovntypes.LocalnetTopology:
-		return ovn.NewSecondaryLocalnetNetworkController(cnci, nInfo, cm.networkManager.Interface()), nil
+		oc := ovn.NewLocalnetUserDefinedNetworkController(cnci, nInfo, cm.networkManager.Interface(), cm.addressSetManager,
+			cm.udnNodeController)
+		return oc, nil
 	}
 	return nil, fmt.Errorf("topology type %s not supported", topoType)
 }
 
-// newDummyNetworkController creates a dummy network controller used to clean up specific network
-func (cm *ControllerManager) newDummyNetworkController(topoType, netName string) (networkmanager.NetworkController, error) {
+// newDummyNetworkController creates a dummy network controller used to clean up specific network.
+// role is the NetworkRoleExternalID from stale OVN entities (e.g. "primary" or "secondary") so that
+// the dummy's netInfo.IsPrimaryNetwork() is correct for Layer2 gateway cleanup.
+func (cm *ControllerManager) newDummyNetworkController(topoType, netName, role string) (networkmanager.NetworkController, error) {
 	// Pass a shallow clone of the watch factory, this allows multiplexing
-	// informers for secondary networks.
+	// informers for user-defined Networks.
 	cnci, err := cm.newCommonNetworkControllerInfo(cm.watchFactory.ShallowClone())
 	if err != nil {
 		return nil, fmt.Errorf("failed to create network controller info %w", err)
 	}
-	netInfo, _ := util.NewNetInfo(&ovncnitypes.NetConf{NetConf: types.NetConf{Name: netName}, Topology: topoType})
+	netInfo, _ := util.NewNetInfo(&ovncnitypes.NetConf{NetConf: types.NetConf{Name: netName}, Topology: topoType, Role: role})
 	switch topoType {
 	case ovntypes.Layer3Topology:
-		return ovn.NewSecondaryLayer3NetworkController(cnci, netInfo, cm.networkManager.Interface(), cm.eIPController, cm.portCache)
+		return ovn.NewLayer3UserDefinedNetworkController(cnci, netInfo, cm.networkManager.Interface(), cm.routeImportManager,
+			cm.eIPController, cm.portCache, cm.addressSetManager, nil)
 	case ovntypes.Layer2Topology:
-		return ovn.NewSecondaryLayer2NetworkController(cnci, netInfo, cm.networkManager.Interface(), cm.eIPController, cm.portCache)
+		return ovn.NewLayer2UserDefinedNetworkController(cnci, netInfo, cm.networkManager.Interface(), cm.routeImportManager,
+			cm.portCache, cm.eIPController, cm.addressSetManager, nil)
 	case ovntypes.LocalnetTopology:
-		return ovn.NewSecondaryLocalnetNetworkController(cnci, netInfo, cm.networkManager.Interface()), nil
+		return ovn.NewLocalnetUserDefinedNetworkController(cnci, netInfo, cm.networkManager.Interface(), cm.addressSetManager, nil), nil
 	}
 	return nil, fmt.Errorf("topology type %s not supported", topoType)
 }
 
-// Find all the OVN logical switches/routers for the secondary networks
-func findAllSecondaryNetworkLogicalEntities(nbClient libovsdbclient.Client) ([]*nbdb.LogicalSwitch,
+// findAllUserDefinedNetworkLogicalEntities returns all OVN logical switches and
+// routers that belong to user-defined networks (primary or secondary). Same
+// predicate as original: entities have NetworkExternalID and NetworkRoleExternalID
+// (TopologyExternalID always co-exists with NetworkExternalID per CleanupStaleNetworks).
+// Caller reads role and topoType from entity ExternalIDs for dummy controller creation.
+// Used on controller restart to remove stale entities for deleted UDNs.
+func findAllUserDefinedNetworkLogicalEntities(nbClient libovsdbclient.Client) ([]*nbdb.LogicalSwitch,
 	[]*nbdb.LogicalRouter, error) {
 
-	belongsToSecondaryNetwork := func(externalIDs map[string]string) bool {
+	belongsToUserDefinedNetwork := func(externalIDs map[string]string) bool {
 		_, hasNetworkExternalID := externalIDs[ovntypes.NetworkExternalID]
-		networkRole, hasNetworkRoleExternalID := externalIDs[ovntypes.NetworkRoleExternalID]
-		return hasNetworkExternalID && hasNetworkRoleExternalID && networkRole == ovntypes.NetworkRoleSecondary
+		_, hasNetworkRoleExternalID := externalIDs[ovntypes.NetworkRoleExternalID]
+		return hasNetworkExternalID && hasNetworkRoleExternalID
 	}
 
 	p1 := func(item *nbdb.LogicalSwitch) bool {
-		return belongsToSecondaryNetwork(item.ExternalIDs)
+		return belongsToUserDefinedNetwork(item.ExternalIDs)
 	}
-	nodeSwitches, err := libovsdbops.FindLogicalSwitchesWithPredicate(nbClient, p1)
+	switches, err := libovsdbops.FindLogicalSwitchesWithPredicate(nbClient, p1)
 	if err != nil {
-		klog.Errorf("Failed to get all logical switches of secondary network error: %v", err)
+		klog.Errorf("Failed to get all logical switches of user-defined networks: %v", err)
 		return nil, nil, err
 	}
 	p2 := func(item *nbdb.LogicalRouter) bool {
-		return belongsToSecondaryNetwork(item.ExternalIDs)
+		return belongsToUserDefinedNetwork(item.ExternalIDs)
 	}
-	clusterRouters, err := libovsdbops.FindLogicalRoutersWithPredicate(nbClient, p2)
+	routers, err := libovsdbops.FindLogicalRoutersWithPredicate(nbClient, p2)
 	if err != nil {
-		klog.Errorf("Failed to get all distributed logical routers: %v", err)
+		klog.Errorf("Failed to get all logical routers of user-defined networks: %v", err)
 		return nil, nil, err
 	}
-	return nodeSwitches, clusterRouters, nil
+	return switches, routers, nil
 }
 
 func (cm *ControllerManager) GetDefaultNetworkController() networkmanager.ReconcilableNetworkController {
@@ -139,12 +169,17 @@ func (cm *ControllerManager) GetDefaultNetworkController() networkmanager.Reconc
 
 func (cm *ControllerManager) CleanupStaleNetworks(validNetworks ...util.NetInfo) error {
 	existingNetworksMap := map[string]string{}
+	validNetworksSubnets := sets.New[string]()
 	for _, network := range validNetworks {
 		existingNetworksMap[network.GetNetworkName()] = network.TopologyType()
+		for _, subnet := range network.Subnets() {
+			validNetworksSubnets.Insert(subnet.CIDR.String())
+		}
 	}
 
-	// Get all the existing secondary networks and its logical entities
-	switches, routers, err := findAllSecondaryNetworkLogicalEntities(cm.nbClient)
+	// Get all the existing user-defined network logical entities (primary and secondary).
+	// For a given network, all switches/routers have the same role external ID (primary or secondary).
+	switches, routers, err := findAllUserDefinedNetworkLogicalEntities(cm.nbClient)
 	if err != nil {
 		return err
 	}
@@ -158,11 +193,15 @@ func (cm *ControllerManager) CleanupStaleNetworks(validNetworks ...util.NetInfo)
 			// network still exists, no cleanup to do
 			continue
 		}
+		role := ls.ExternalIDs[ovntypes.NetworkRoleExternalID]
+		if _, ok := staleNetworkControllers[netName]; ok {
+			// already have a dummy controller for this network (from an earlier entity)
+			continue
+		}
 		// Create dummy network controllers to clean up logical entities
 		klog.V(5).Infof("Found stale %s network %s", topoType, netName)
-		if oc, err := cm.newDummyNetworkController(topoType, netName); err == nil {
+		if oc, err := cm.newDummyNetworkController(topoType, netName, role); err == nil {
 			staleNetworkControllers[netName] = oc
-			continue
 		}
 	}
 	for _, lr := range routers {
@@ -173,11 +212,15 @@ func (cm *ControllerManager) CleanupStaleNetworks(validNetworks ...util.NetInfo)
 			// network still exists, no cleanup to do
 			continue
 		}
+		role := lr.ExternalIDs[ovntypes.NetworkRoleExternalID]
+		if _, ok := staleNetworkControllers[netName]; ok {
+			// already have a dummy controller for this network (from an earlier entity)
+			continue
+		}
 		// Create dummy network controllers to clean up logical entities
 		klog.V(5).Infof("Found stale %s network %s", topoType, netName)
-		if oc, err := cm.newDummyNetworkController(topoType, netName); err == nil {
+		if oc, err := cm.newDummyNetworkController(topoType, netName, role); err == nil {
 			staleNetworkControllers[netName] = oc
-			continue
 		}
 	}
 
@@ -186,6 +229,29 @@ func (cm *ControllerManager) CleanupStaleNetworks(validNetworks ...util.NetInfo)
 		err = oc.Cleanup()
 		if err != nil {
 			klog.Errorf("Failed to delete stale OVN logical entities for network %s: %v", netName, err)
+		}
+	}
+
+	// Remove stale subnets from the advertised networks address set used for isolation
+	// NOTE: network reconciliation will take care of removing the subnets for existing networks that are no longer
+	// advertised.
+	addressSetFactory := addressset.NewOvnAddressSetFactory(cm.nbClient, config.IPv4Mode, config.IPv6Mode)
+	advertisedSubnets, err := addressSetFactory.GetAddressSet(ovn.GetAdvertisedNetworkSubnetsAddressSetDBIDs())
+	if err != nil && !errors.Is(err, libovsdbclient.ErrNotFound) {
+		return fmt.Errorf("failed to get advertised subnets addresset %s: %w", ovn.GetAdvertisedNetworkSubnetsAddressSetDBIDs(), err)
+	}
+	if advertisedSubnets != nil {
+		v4AdvertisedSubnets, v6AdvertisedSubnets := advertisedSubnets.GetAddresses()
+		var invalidSubnets []string
+		for _, subnet := range append(v4AdvertisedSubnets, v6AdvertisedSubnets...) {
+			if !validNetworksSubnets.Has(subnet) {
+				klog.Infof("Cleanup stale advertised subnet: %q", subnet)
+				invalidSubnets = append(invalidSubnets, subnet)
+			}
+		}
+
+		if err := advertisedSubnets.DeleteAddresses(invalidSubnets); err != nil {
+			klog.Errorf("Failed to delete stale advertised subnets: %v", invalidSubnets)
 		}
 	}
 	return nil
@@ -210,6 +276,8 @@ func NewControllerManager(ovnClient *util.OVNClientset, wf *factory.WatchFactory
 			APBRouteClient:       ovnClient.AdminPolicyRouteClient,
 			EgressQoSClient:      ovnClient.EgressQoSClient,
 			IPAMClaimsClient:     ovnClient.IPAMClaimsClient,
+			NetworkQoSClient:     ovnClient.NetworkQoSClient,
+			NADClient:            ovnClient.NetworkAttchDefClient,
 		},
 		stopChan:         stopCh,
 		watchFactory:     wf,
@@ -221,14 +289,15 @@ func NewControllerManager(ovnClient *util.OVNClientset, wf *factory.WatchFactory
 		wg:               wg,
 		multicastSupport: config.EnableMulticast,
 	}
-
 	var err error
+
 	cm.networkManager = networkmanager.Default()
 	if config.OVNKubernetesFeature.EnableMultiNetwork {
 		cm.networkManager, err = networkmanager.NewForZone(config.Default.Zone, cm, wf)
 		if err != nil {
 			return nil, err
 		}
+		cm.udnNodeController = nodecontroller.NewNodeController(cm.watchFactory, cm.networkManager.Interface())
 	}
 
 	if util.IsRouteAdvertisementsEnabled() {
@@ -237,23 +306,10 @@ func NewControllerManager(ovnClient *util.OVNClientset, wf *factory.WatchFactory
 		}
 		cm.routeImportManager = routeimport.New(config.Default.Zone, cm.nbClient)
 	}
+	cm.addressSetManager = addresssetmanager.NewAddressSetManager(cm.watchFactory.PodCoreInformer(),
+		cm.watchFactory.NamespaceInformer(), cm.nbClient, cm.networkManager.Interface().GetNetworkNameForNADKey)
 
 	return cm, nil
-}
-
-func (cm *ControllerManager) configureSCTPSupport() error {
-	hasSCTPSupport, err := util.DetectSCTPSupport()
-	if err != nil {
-		return err
-	}
-
-	if !hasSCTPSupport {
-		klog.Warningf("SCTP unsupported by this version of OVN. Kubernetes service creation with SCTP will not work ")
-	} else {
-		klog.Info("SCTP support detected in OVN")
-	}
-	cm.SCTPSupport = hasSCTPSupport
-	return nil
 }
 
 func (cm *ControllerManager) configureSvcTemplateSupport() {
@@ -308,7 +364,7 @@ func (cm *ControllerManager) createACLLoggingMeter() error {
 // newCommonNetworkControllerInfo creates and returns the common networkController info
 func (cm *ControllerManager) newCommonNetworkControllerInfo(wf *factory.WatchFactory) (*ovn.CommonNetworkControllerInfo, error) {
 	return ovn.NewCommonNetworkControllerInfo(cm.client, cm.kube, wf, cm.recorder, cm.nbClient,
-		cm.sbClient, cm.podRecorder, cm.SCTPSupport, cm.multicastSupport, cm.svcTemplateSupport)
+		cm.sbClient, cm.podRecorder, cm.multicastSupport, cm.svcTemplateSupport)
 }
 
 // initDefaultNetworkController creates the controller for default network
@@ -317,7 +373,7 @@ func (cm *ControllerManager) initDefaultNetworkController(observManager *observa
 	if err != nil {
 		return fmt.Errorf("failed to create common network controller info: %w", err)
 	}
-	defaultController, err := ovn.NewDefaultNetworkController(cnci, observManager, cm.networkManager.Interface(), cm.routeImportManager, cm.eIPController, cm.portCache)
+	defaultController, err := ovn.NewDefaultNetworkController(cnci, observManager, cm.networkManager.Interface(), cm.routeImportManager, cm.eIPController, cm.portCache, cm.addressSetManager)
 	if err != nil {
 		return err
 	}
@@ -391,31 +447,34 @@ func (cm *ControllerManager) Start(ctx context.Context) error {
 	}
 	klog.Infof("Waiting for node in zone sync took: %s", time.Since(start))
 
-	cm.configureMetrics(cm.stopChan)
-
-	err = cm.configureSCTPSupport()
-	if err != nil {
-		return err
+	if err = cm.setTopologyType(); err != nil {
+		return fmt.Errorf("failed to set layer2 topology type: %w", err)
 	}
+
+	cm.configureMetrics(cm.stopChan)
 
 	cm.configureSvcTemplateSupport()
 
 	err = cm.createACLLoggingMeter()
 	if err != nil {
-		return nil
+		return fmt.Errorf("failed to create acl logging meter: %w", err)
 	}
 
 	if config.Metrics.EnableConfigDuration {
 		// with k=10,
 		//  for a cluster with 10 nodes, measurement of 1 in every 100 requests
 		//  for a cluster with 100 nodes, measurement of 1 in every 1000 requests
-		metrics.GetConfigDurationRecorder().Run(cm.nbClient, cm.kube, 10, time.Second*5, cm.stopChan)
+		recorders.GetConfigDurationRecorder().Run(cm.nbClient, cm.watchFactory, 10, time.Second*5, cm.stopChan)
 	}
 	cm.podRecorder.Run(cm.sbClient, cm.stopChan)
 
+	if err := cm.addressSetManager.Start(); err != nil {
+		return fmt.Errorf("failed to start address set manager: %w", err)
+	}
+
 	if config.OVNKubernetesFeature.EnableEgressIP {
 		cm.eIPController = ovn.NewEIPController(cm.nbClient, cm.kube, cm.watchFactory, cm.recorder, cm.portCache, cm.networkManager.Interface(),
-			addressset.NewOvnAddressSetFactory(cm.nbClient, config.IPv4Mode, config.IPv6Mode), config.IPv4Mode, config.IPv6Mode, zone, ovn.DefaultNetworkControllerName)
+			addressset.NewOvnAddressSetFactory(cm.nbClient, config.IPv4Mode, config.IPv6Mode), config.IPv4Mode, config.IPv6Mode, zone, ovntypes.DefaultNetworkControllerName)
 		// FIXME(martinkennelly): remove when EIP controller is fully extracted from from DNC and started here. Ensure SyncLocalNodeZonesCache is re-enabled in EIP controller.
 		if err = cm.eIPController.SyncLocalNodeZonesCache(); err != nil {
 			klog.Warningf("Failed to sync EgressIP controllers local node node cache: %v", err)
@@ -450,7 +509,18 @@ func (cm *ControllerManager) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to init default network controller: %v", err)
 	}
 
+	if util.IsRouteAdvertisementsEnabled() {
+		if err := cm.configureAdvertisedNetworkIsolation(); err != nil {
+			return fmt.Errorf("failed to initialize advertised network isolation: %w", err)
+		}
+	}
+
 	if cm.networkManager != nil {
+		if cm.udnNodeController != nil {
+			if err = cm.udnNodeController.Start(); err != nil {
+				return fmt.Errorf("failed to start UDN node topology controller: %v", err)
+			}
+		}
 		if err = cm.networkManager.Start(); err != nil {
 			return fmt.Errorf("failed to start NAD Controller :%v", err)
 		}
@@ -483,14 +553,125 @@ func (cm *ControllerManager) Stop() {
 
 	// stop the NAD controller
 	if cm.networkManager != nil {
+		if cm.udnNodeController != nil {
+			cm.udnNodeController.Stop()
+		}
 		cm.networkManager.Stop()
 	}
 
 	if cm.routeImportManager != nil {
 		cm.routeImportManager.Stop()
 	}
+
+	if cm.addressSetManager != nil {
+		cm.addressSetManager.Stop()
+	}
 }
 
 func (cm *ControllerManager) Reconcile(_ string, _, _ util.NetInfo) error {
+	return nil
+}
+
+func (cm *ControllerManager) configureAdvertisedNetworkIsolation() error {
+	addressSetFactory := addressset.NewOvnAddressSetFactory(cm.nbClient, config.IPv4Mode, config.IPv6Mode)
+	_, err := addressSetFactory.EnsureAddressSet(ovn.GetAdvertisedNetworkSubnetsAddressSetDBIDs())
+	return err
+}
+
+func (cm *ControllerManager) setTopologyType() error {
+	nodes, err := cm.kube.KClient.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("unable to get nodes from informer while setting topology type for layer2: %w", err)
+	}
+	// set it to true and check if all the nodes in the zone already have annotation
+	config.Layer2UsesTransitRouter = true
+	for _, node := range nodes.Items {
+		if util.GetNodeZone(&node) == config.Default.Zone && node.Annotations[util.Layer2TopologyVersion] != util.TransitRouterTopoVersion {
+			// at least one node doesn't have the annotation
+			config.Layer2UsesTransitRouter = false
+			break
+		}
+	}
+	if config.Layer2UsesTransitRouter {
+		// all nodes are already using new topology, no need to do anything extra
+		return nil
+	}
+
+	// Transit router is not used yet, check if we can switch to the new topology now.
+	// Find all primary layer2 switches and check if they have any running pods.
+	layer2Switches, err := libovsdbops.FindLogicalSwitchesWithPredicate(cm.nbClient, func(ls *nbdb.LogicalSwitch) bool {
+		return ls.ExternalIDs[ovntypes.TopologyExternalID] == ovntypes.Layer2Topology &&
+			ls.ExternalIDs[ovntypes.NetworkRoleExternalID] == ovntypes.NetworkRolePrimary
+	})
+	if err != nil {
+		return fmt.Errorf("failed to find layer2 switches: %w", err)
+	}
+	for _, sw := range layer2Switches {
+		hasRunningPods, err := cm.hasLocalPodsOnSwitch(sw)
+		if err != nil {
+			return fmt.Errorf("failed to check if there are running pods on switch %s: %w", sw.Name, err)
+		}
+		if hasRunningPods {
+			klog.Infof("Network %s has running pods, not switching to transit router topology yet", sw.Name)
+			return nil
+		}
+	}
+	// we checked all layer2 switches and none of them has running pods
+	// now make sure that cluster manager has upgraded and is assigning tunnel keys, otherwise new topology won't work
+
+	// no layer2 switches means there are no layer2 networks (already handled, new ones are fine), so we won't find tunnel-keys annotations
+	if len(layer2Switches) != 0 {
+		existingNADs, err := cm.kube.NADClient.K8sCniCncfIoV1().NetworkAttachmentDefinitions("").List(context.TODO(), metav1.ListOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to list existing NADs: %w", err)
+		}
+		clusterManagerReady := false
+		for _, nad := range existingNADs.Items {
+			if nad.Annotations[ovntypes.OvnNetworkTunnelKeysAnnotation] != "" {
+				clusterManagerReady = true
+				break
+			}
+		}
+		if !clusterManagerReady {
+			klog.Infof("Cluster manager is not ready to assign tunnel keys yet, not switching to transit router topology yet")
+			return nil
+		}
+	}
+
+	klog.Infof("Switching to transit router for layer2 networks")
+	config.Layer2UsesTransitRouter = true
+	return cm.setUDNLayer2NodeUsesTransitRouter(nodes)
+}
+
+func (cm *ControllerManager) hasLocalPodsOnSwitch(sw *nbdb.LogicalSwitch) (bool, error) {
+	if len(sw.Ports) == 0 {
+		return false, nil
+	}
+
+	ports, err := libovsdbops.FindLogicalSwitchPortWithPredicate(
+		cm.nbClient,
+		func(lsp *nbdb.LogicalSwitchPort) bool {
+			return lsp.Type == "" &&
+				lsp.ExternalIDs["pod"] == "true" &&
+				slices.Contains(sw.Ports, lsp.UUID)
+		})
+	if err != nil {
+		return false, err
+	}
+	if len(ports) > 0 {
+		return true, nil
+	}
+	return false, nil
+}
+
+func (cm *ControllerManager) setUDNLayer2NodeUsesTransitRouter(nodeList *corev1.NodeList) error {
+	for _, node := range nodeList.Items {
+		if util.GetNodeZone(&node) == config.Default.Zone {
+			if err := cm.kube.SetAnnotationsOnNode(node.Name, map[string]interface{}{
+				util.Layer2TopologyVersion: util.TransitRouterTopoVersion}); err != nil {
+				return fmt.Errorf("failed to set annotation %s on node %s: %w", util.Layer2TopologyVersion, node.Name, err)
+			}
+		}
+	}
 	return nil
 }

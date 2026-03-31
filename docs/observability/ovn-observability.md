@@ -7,6 +7,7 @@ specific OVS flows are matched. To see the generated samples, a binary called `o
 This binary allows printing the samples to stdout or writing them to a file.
 
 Currently, supports observability for:
+
 - Network Policy
 - (Baseline) Admin Network Policy
 - Egress firewall
@@ -37,27 +38,43 @@ insights of what ovn-kubernetes is doing with a packet and why.
 
 To enable this feature, use `--observability` flag with `kind.sh` script or `--enable-observability` flag with `ovnkube` binary.
 
-To see the samples, use `ovnkube-observ` binary, use `-h` to see allowed flags.
+To see the samples, use `ovnkube-observ` binary, with `-h` to see allowed flags. `ovnkube-observ` is installed on the ovnkube pods. For example:
+
+```
+kubectl -n ovn-kubernetes exec -it <ovnkube pod> -c ovnkube-controller -- ovnkube-observ -h
+Usage of ovnkube-observ:
+  -add-ovs-collector
+    	Add ovs collector to enable sampling. Use with caution. Make sure no one else is using observability.
+  -enable-enrichment
+    	Enrich samples with nbdb data. (default true)
+  -filter-dst-ip string
+    	Filter in only packets to a given destination ip.
+  -filter-src-ip string
+    	Filter in only packets from a given source ip.
+  -log-cookie
+    	Print raw sample cookie with psample group_id.
+  -output-file string
+    	Output file to write the samples to.
+  -print-full-packet
+    	Print full received packet. When false, only src and dst ips are printed with every sample.
+```
 
 This feature requires OVS 3.4 and linux kernel 6.11.
-
-As of Aug 2024, the kernel need to be built from the source, therefore to try this feature you need to:
-- rebuild the kernel with the current master branch from [Linus' tree](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git)
-  - to rebuild on fedora: https://docs.fedoraproject.org/en-US/quick-docs/kernel-build-custom/#_building_a_vanilla_upstream_kernel
-- Build an ovn-kubernetes image that uses the latest OVS/OVN code:
-`OVS_BRANCH=main make -C dist/images fedora-dev`
-- Start kind with that image, use `-ov localhost/ovn-kube-fedora-dev:latest` flag with `kind.sh` script.
 
 ## Workflow Description
 
 - Observability is enabled by setting the `--enable-observability` flag in the `ovnkube` binary.
 - For now all mentioned features are enabled by this flag at the same time.
-- `ovnkube-observ` binary is used to see the samples. Samples are only generated when the real traffic matching the ACLs
-is sent through the OVS. An example output is:
+- To start observing and display the samples, run `ovnkube-observ -add-ovs-collector`. Samples are only generated when the real traffic matching the ACLs is sent through the OVS. An example output is:
+
 ```
 OVN-K message: Allowed by default allow from local node policy, direction ingress
 src=10.129.2.2, dst=10.129.2.5
 ```
+
+## Support in observability tools
+
+- [NetObserv](https://github.com/netobserv/network-observability-operator): through the `NetworkEvents` agent feature.
 
 ## Implementation Details
 
@@ -68,9 +85,11 @@ No API changes were done.
 ### OVN sampling details
 
 OVN has 3 main db tables that are used for sampling:
-- `Sample_collector`: This table is used to define the sampling collector. It defines the sampling rate and collectorID, 
-which is used to set up collectors in the OVS. 
+- `Sample_collector`: This table is used to define the sampling collector. It defines the sampling rate via `Probability` field
+and collectorID via `SetID` field, which is used to set up collectors in the OVS. 
 - `Sampling_app`: This table is used to set `ID`s for existing OVN sampling applications, that are sent together with the samples.
+There is a supported set of `Sampling_app` types, for example `acl-new` app is used to sample new connections matched by an ACL.
+`Sampling_app.ID` is a way to identify the application that generated the sample.
 - `Sample`: This table is used to define required samples and point to the collectors. 
 Every sample has `Metadata` that is sent together with the sample.
 
@@ -84,14 +103,20 @@ that is decoded by `go-controller/observability-lib`.
 When one of the supported objects (for example, network policy) is created, ovn-kuberentes generates an nbdb `Sample` for it.
 
 To decode the samples into human-readable information, `go-controller/observability-lib` is used. It finds `Sample`
-by the attached `Sample.Metadata` and then gets corresponding db object based on `Sampling_add.ID` and `Sample.UUID`.
-The message is then constructed using db object `external_ids`.
-
-### Full stack architecture
+by the attached `Sample.Metadata` and then gets corresponding db object (e.g. ACL) based on `Sampling_app.ID` and `Sample.UUID`.
+The message is then constructed using db object (e.g. ACL) `external_ids`.
 
 ![ovnkube-observ](../images/ovnkube-observ.png)
 
 The diagram shows how all involved components (kernel, OVS, OVN, ovn-kubernetes) are connected.
+
+#### Enabling collectors
+
+Currently, we have only 1 default collector with hard-coded ID, which is set via the `Sample_collector.SetID` field.
+To make OVS start sending samples for an existing `Sample_collector`, a new OVSDB `Flow_Sample_Collector_Set` entry
+needs to be created with `Flow_Sample_Collector_Set.ID` value of `Sample_collector.SetID`. 
+This is done by the `go-controller/observability-lib` and it is important to note that only one `Flow_Sample_Collector_Set`
+should be created for a given `Sample_collector.SetID` value at a time. But if such entry already exists, it can be reused.
 
 ## Best Practices
 
@@ -125,6 +150,9 @@ This applies to
   - ANP + BANP 
   
   in both cases ANP will have only first-packet sample.
+
+Use caution when running the `ovnkube-observe` tool. Currently it has poor resource management and consumes a lot of 
+CPU when many packets are sent. Tracked here https://github.com/ovn-kubernetes/ovn-kubernetes/issues/5203
 
 ## References
 

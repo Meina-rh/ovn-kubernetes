@@ -18,7 +18,7 @@ limitations under the License.
 package fake
 
 import (
-	v1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1/apis/clientset/versioned/typed/adminpolicybasedroute/v1"
+	v1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1/apis/clientset/versioned/typed/adminpolicybasedroute/v1"
 	rest "k8s.io/client-go/rest"
 	testing "k8s.io/client-go/testing"
 )
@@ -28,7 +28,7 @@ type FakeK8sV1 struct {
 }
 
 func (c *FakeK8sV1) AdminPolicyBasedExternalRoutes() v1.AdminPolicyBasedExternalRouteInterface {
-	return &FakeAdminPolicyBasedExternalRoutes{c}
+	return newFakeAdminPolicyBasedExternalRoutes(c)
 }
 
 // RESTClient returns a RESTClient that is used to communicate

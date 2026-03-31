@@ -19,12 +19,13 @@ import (
 	listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/klog/v2"
 
-	hotypes "github.com/ovn-org/ovn-kubernetes/go-controller/hybrid-overlay/pkg/types"
-	houtil "github.com/ovn-org/ovn-kubernetes/go-controller/hybrid-overlay/pkg/util"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	hotypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/hybrid-overlay/pkg/types"
+	houtil "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/hybrid-overlay/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/generator/udn"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/kube"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 const (
@@ -261,7 +262,7 @@ func (n *NodeController) AddNode(node *corev1.Node) error {
 	} else {
 		// Make sure the local node has been initialized before adding a hybridOverlay remote node
 		if atomic.LoadUint32(n.initState) < hotypes.DistributedRouterInitialized {
-			localNode, err := n.kube.GetNode(n.nodeName)
+			localNode, err := n.nodeLister.Get(n.nodeName)
 			if err != nil {
 				return fmt.Errorf("cannot get local node: %s: %w", n.nodeName, err)
 			}
@@ -499,7 +500,7 @@ func (n *NodeController) EnsureHybridOverlayBridge(node *corev1.Node) error {
 		return nil
 	}
 	if n.gwLRPIP == nil {
-		gwLRPIP, err := util.ParseNodeGatewayRouterJoinIPv4(node, types.DefaultNetworkName)
+		gwLRPIP, err := udn.GetGWRouterIPv4(node, &util.DefaultNetInfo{})
 		if err != nil {
 			return fmt.Errorf("invalid Gateway Router LRP IP: %v", err)
 		}

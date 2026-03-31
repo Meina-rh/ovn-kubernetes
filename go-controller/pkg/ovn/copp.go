@@ -3,11 +3,11 @@ package ovn
 import (
 	"fmt"
 
-	libovsdbclient "github.com/ovn-org/libovsdb/client"
+	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
 
-	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
 )
 
 const (
@@ -21,9 +21,6 @@ const (
 	OVNRejectRateLimiter           = "reject"
 	OVNTCPRSTRateLimiter           = "tcp-reset"
 	OVNServiceMonitorLimiter       = "svc-monitor"
-
-	// Default COPP object name
-	defaultCOPPName = "ovnkube-default"
 )
 
 var defaultProtocolNames = [...]string{
@@ -83,7 +80,7 @@ func EnsureDefaultCOPP(nbClient libovsdbclient.Client) (string, error) {
 	}
 
 	defaultCOPP := &nbdb.Copp{
-		Name:   defaultCOPPName,
+		Name:   types.DefaultCOPPName,
 		Meters: meterNames,
 	}
 	ops, err = libovsdbops.CreateOrUpdateCOPPsOps(nbClient, ops, defaultCOPP)

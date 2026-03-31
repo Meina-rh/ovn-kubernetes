@@ -18,13 +18,13 @@ limitations under the License.
 package v1
 
 import (
-	"context"
+	context "context"
 	time "time"
 
-	userdefinednetworkv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1"
-	versioned "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1/apis/clientset/versioned"
-	internalinterfaces "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1/apis/informers/externalversions/internalinterfaces"
-	v1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1/apis/listers/userdefinednetwork/v1"
+	crduserdefinednetworkv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1"
+	versioned "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1/apis/clientset/versioned"
+	internalinterfaces "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1/apis/informers/externalversions/internalinterfaces"
+	userdefinednetworkv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1/apis/listers/userdefinednetwork/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	watch "k8s.io/apimachinery/pkg/watch"
@@ -35,7 +35,7 @@ import (
 // UserDefinedNetworks.
 type UserDefinedNetworkInformer interface {
 	Informer() cache.SharedIndexInformer
-	Lister() v1.UserDefinedNetworkLister
+	Lister() userdefinednetworkv1.UserDefinedNetworkLister
 }
 
 type userDefinedNetworkInformer struct {
@@ -56,21 +56,33 @@ func NewUserDefinedNetworkInformer(client versioned.Interface, namespace string,
 // one. This reduces memory footprint and number of connections to the server.
 func NewFilteredUserDefinedNetworkInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) cache.SharedIndexInformer {
 	return cache.NewSharedIndexInformer(
-		&cache.ListWatch{
+		cache.ToListWatcherWithWatchListSemantics(&cache.ListWatch{
 			ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.K8sV1().UserDefinedNetworks(namespace).List(context.TODO(), options)
+				return client.K8sV1().UserDefinedNetworks(namespace).List(context.Background(), options)
 			},
 			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.K8sV1().UserDefinedNetworks(namespace).Watch(context.TODO(), options)
+				return client.K8sV1().UserDefinedNetworks(namespace).Watch(context.Background(), options)
 			},
-		},
-		&userdefinednetworkv1.UserDefinedNetwork{},
+			ListWithContextFunc: func(ctx context.Context, options metav1.ListOptions) (runtime.Object, error) {
+				if tweakListOptions != nil {
+					tweakListOptions(&options)
+				}
+				return client.K8sV1().UserDefinedNetworks(namespace).List(ctx, options)
+			},
+			WatchFuncWithContext: func(ctx context.Context, options metav1.ListOptions) (watch.Interface, error) {
+				if tweakListOptions != nil {
+					tweakListOptions(&options)
+				}
+				return client.K8sV1().UserDefinedNetworks(namespace).Watch(ctx, options)
+			},
+		}, client),
+		&crduserdefinednetworkv1.UserDefinedNetwork{},
 		resyncPeriod,
 		indexers,
 	)
@@ -81,9 +93,9 @@ func (f *userDefinedNetworkInformer) defaultInformer(client versioned.Interface,
 }
 
 func (f *userDefinedNetworkInformer) Informer() cache.SharedIndexInformer {
-	return f.factory.InformerFor(&userdefinednetworkv1.UserDefinedNetwork{}, f.defaultInformer)
+	return f.factory.InformerFor(&crduserdefinednetworkv1.UserDefinedNetwork{}, f.defaultInformer)
 }
 
-func (f *userDefinedNetworkInformer) Lister() v1.UserDefinedNetworkLister {
-	return v1.NewUserDefinedNetworkLister(f.Informer().GetIndexer())
+func (f *userDefinedNetworkInformer) Lister() userdefinednetworkv1.UserDefinedNetworkLister {
+	return userdefinednetworkv1.NewUserDefinedNetworkLister(f.Informer().GetIndexer())
 }

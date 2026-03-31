@@ -18,13 +18,13 @@ limitations under the License.
 package v1
 
 import (
-	"context"
+	context "context"
 	time "time"
 
-	userdefinednetworkv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1"
-	versioned "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1/apis/clientset/versioned"
-	internalinterfaces "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1/apis/informers/externalversions/internalinterfaces"
-	v1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1/apis/listers/userdefinednetwork/v1"
+	crduserdefinednetworkv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1"
+	versioned "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1/apis/clientset/versioned"
+	internalinterfaces "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1/apis/informers/externalversions/internalinterfaces"
+	userdefinednetworkv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1/apis/listers/userdefinednetwork/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	watch "k8s.io/apimachinery/pkg/watch"
@@ -35,7 +35,7 @@ import (
 // ClusterUserDefinedNetworks.
 type ClusterUserDefinedNetworkInformer interface {
 	Informer() cache.SharedIndexInformer
-	Lister() v1.ClusterUserDefinedNetworkLister
+	Lister() userdefinednetworkv1.ClusterUserDefinedNetworkLister
 }
 
 type clusterUserDefinedNetworkInformer struct {
@@ -55,21 +55,33 @@ func NewClusterUserDefinedNetworkInformer(client versioned.Interface, resyncPeri
 // one. This reduces memory footprint and number of connections to the server.
 func NewFilteredClusterUserDefinedNetworkInformer(client versioned.Interface, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) cache.SharedIndexInformer {
 	return cache.NewSharedIndexInformer(
-		&cache.ListWatch{
+		cache.ToListWatcherWithWatchListSemantics(&cache.ListWatch{
 			ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.K8sV1().ClusterUserDefinedNetworks().List(context.TODO(), options)
+				return client.K8sV1().ClusterUserDefinedNetworks().List(context.Background(), options)
 			},
 			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.K8sV1().ClusterUserDefinedNetworks().Watch(context.TODO(), options)
+				return client.K8sV1().ClusterUserDefinedNetworks().Watch(context.Background(), options)
 			},
-		},
-		&userdefinednetworkv1.ClusterUserDefinedNetwork{},
+			ListWithContextFunc: func(ctx context.Context, options metav1.ListOptions) (runtime.Object, error) {
+				if tweakListOptions != nil {
+					tweakListOptions(&options)
+				}
+				return client.K8sV1().ClusterUserDefinedNetworks().List(ctx, options)
+			},
+			WatchFuncWithContext: func(ctx context.Context, options metav1.ListOptions) (watch.Interface, error) {
+				if tweakListOptions != nil {
+					tweakListOptions(&options)
+				}
+				return client.K8sV1().ClusterUserDefinedNetworks().Watch(ctx, options)
+			},
+		}, client),
+		&crduserdefinednetworkv1.ClusterUserDefinedNetwork{},
 		resyncPeriod,
 		indexers,
 	)
@@ -80,9 +92,9 @@ func (f *clusterUserDefinedNetworkInformer) defaultInformer(client versioned.Int
 }
 
 func (f *clusterUserDefinedNetworkInformer) Informer() cache.SharedIndexInformer {
-	return f.factory.InformerFor(&userdefinednetworkv1.ClusterUserDefinedNetwork{}, f.defaultInformer)
+	return f.factory.InformerFor(&crduserdefinednetworkv1.ClusterUserDefinedNetwork{}, f.defaultInformer)
 }
 
-func (f *clusterUserDefinedNetworkInformer) Lister() v1.ClusterUserDefinedNetworkLister {
-	return v1.NewClusterUserDefinedNetworkLister(f.Informer().GetIndexer())
+func (f *clusterUserDefinedNetworkInformer) Lister() userdefinednetworkv1.ClusterUserDefinedNetworkLister {
+	return userdefinednetworkv1.NewClusterUserDefinedNetworkLister(f.Informer().GetIndexer())
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 	"time"
 
@@ -16,13 +17,14 @@ import (
 	ktypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kubevirt"
-	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/libovsdb"
-	ovntypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/kubevirt"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing/libovsdb"
+	ovntypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -41,6 +43,8 @@ var _ = Describe("OVN Kubevirt Operations", func() {
 		dnsServiceIPv6    = "fd7b:6b4d:7b25:d22f::3"
 		clusterCIDRIPv4   = "10.128.0.0/16"
 		clusterCIDRIPv6   = "fe00::/64"
+		subnetSuffixIPv4  = "/24"
+		subnetSuffixIPv6  = "/64"
 	)
 	type testDHCPOptions struct {
 		cidr     string
@@ -97,12 +101,17 @@ var _ = Describe("OVN Kubevirt Operations", func() {
 		expectedStaticRoutes []testStaticRoute
 	}
 	type testNode struct {
+		nodeID                string
 		lrpNetworkIPv4        string
 		lrpNetworkIPv6        string
 		subnetIPv4            string
 		subnetIPv6            string
+		gwIPv4                string
+		gwIPv6                string
 		transitSwitchPortIPv4 string
 		transitSwitchPortIPv6 string
+		addressIPv4           string
+		addressIPv6           string
 	}
 
 	type testVM struct {
@@ -116,28 +125,43 @@ var _ = Describe("OVN Kubevirt Operations", func() {
 		initialDB  libovsdb.TestSetup
 		nodeByName = map[string]testNode{
 			node1: {
+				nodeID:                "4",
 				subnetIPv4:            "10.128.1.0/24",
 				subnetIPv6:            "fd11::/64",
+				gwIPv4:                "10.128.1.1",
+				gwIPv6:                "fd11::1",
 				lrpNetworkIPv4:        "100.64.0.4/24",
-				lrpNetworkIPv6:        "fd12::4/64",
+				lrpNetworkIPv6:        "fd98::4/64",
 				transitSwitchPortIPv4: "100.65.0.4/24",
 				transitSwitchPortIPv6: "fd13::4/64",
+				addressIPv4:           "10.89.0.1/24",
+				addressIPv6:           "fc00:f853:ccd:e793::1/64",
 			},
 			node2: {
+				nodeID:                "5",
 				subnetIPv4:            "10.128.2.0/24",
 				subnetIPv6:            "fd12::/64",
+				gwIPv4:                "10.128.2.1",
+				gwIPv6:                "fd12::1",
 				lrpNetworkIPv4:        "100.64.0.5/24",
-				lrpNetworkIPv6:        "fd12::5/64",
+				lrpNetworkIPv6:        "fd98::5/64",
 				transitSwitchPortIPv4: "100.65.0.5/24",
 				transitSwitchPortIPv6: "fd13::5/64",
+				addressIPv4:           "10.89.0.2/24",
+				addressIPv6:           "fc00:f853:ccd:e793::2/64",
 			},
 			node3: {
+				nodeID:                "6",
 				subnetIPv4:            "10.128.3.0/24",
 				subnetIPv6:            "fd13::/64",
+				gwIPv4:                "10.128.3.1",
+				gwIPv6:                "fd13::1",
 				lrpNetworkIPv4:        "100.64.0.6/24",
-				lrpNetworkIPv6:        "fd12::6/64",
+				lrpNetworkIPv6:        "fd98::6/64",
 				transitSwitchPortIPv4: "100.65.0.6/24",
 				transitSwitchPortIPv6: "fd13::6/64",
+				addressIPv4:           "10.89.0.3/24",
+				addressIPv6:           "fc00:f853:ccd:e793::3/64",
 			},
 		}
 		vmByName = map[string]testVM{
@@ -146,10 +170,6 @@ var _ = Describe("OVN Kubevirt Operations", func() {
 				addressIPv6: "fd11::3",
 			},
 		}
-		logicalSwitch                            *nbdb.LogicalSwitch
-		ovnClusterRouter                         *nbdb.LogicalRouter
-		logicalRouterPort                        *nbdb.LogicalRouterPort
-		migrationSourceLSRP, migrationTargetLSRP *nbdb.LogicalSwitchPort
 
 		lrpIP = func(network string) string {
 			return strings.Split(network, "/")[0]
@@ -245,11 +265,32 @@ var _ = Describe("OVN Kubevirt Operations", func() {
 			return append(previousData, data...)
 		}
 
+		filterOutStaleVirtLauncherExpectedTestData = func(namespace, name string, previousData []libovsdb.TestData) []libovsdb.TestData {
+			var data []libovsdb.TestData
+			lspUUID := util.GetLogicalPortName(namespace, name) + "-UUID"
+			for _, d := range previousData {
+				switch model := d.(type) {
+				case *nbdb.LogicalSwitch:
+					lsp := *model
+					lsp.Ports = slices.Clone(lsp.Ports)
+					lsp.Ports = slices.DeleteFunc(lsp.Ports, func(port string) bool { return port == lspUUID })
+					d = &lsp
+				case *nbdb.LogicalSwitchPort:
+					if model.UUID == lspUUID {
+						continue
+					}
+				}
+				data = append(data, d)
+
+			}
+			return data
+		}
+
 		newPodFromTestVirtLauncherPod = func(t testVirtLauncherPod) *corev1.Pod {
 			if t.podName == "" {
 				return nil
 			}
-			pod := newPod(t.namespace, t.podName, t.nodeName, t.podIP)
+			pod := testing.NewPod(t.namespace, t.podName, t.nodeName, t.podIP)
 			pod.Annotations = t.annotations
 			pod.Labels = t.labels
 			return pod
@@ -265,17 +306,20 @@ var _ = Describe("OVN Kubevirt Operations", func() {
 				pod.Annotations[k] = v
 			}
 		}
-		ComposeDHCPv4Options = func(uuid, namespace string, t *testDHCPOptions) *nbdb.DHCPOptions {
+		ComposeDHCPv4Options = func(uuid, namespace string, nodeName string, t *testDHCPOptions) *nbdb.DHCPOptions {
+			GinkgoHelper()
 			dhcpOptions := kubevirt.ComposeDHCPv4Options(
 				t.cidr,
-				DefaultNetworkControllerName,
+				ovntypes.DefaultNetworkControllerName,
 				ktypes.NamespacedName{
 					Namespace: namespace,
 					Name:      t.hostname,
 				},
 			)
+
+			dhcpOptions.Options["mtu"] = "1400"
 			dhcpOptions.Options["dns_server"] = t.dns
-			dhcpOptions.Options["router"] = kubevirt.ARPProxyIPv4
+			dhcpOptions.Options["router"] = nodeByName[nodeName].gwIPv4
 			dhcpOptions.UUID = uuid
 
 			return dhcpOptions
@@ -283,7 +327,7 @@ var _ = Describe("OVN Kubevirt Operations", func() {
 		ComposeDHCPv6Options = func(uuid, namespace string, t *testDHCPOptions) *nbdb.DHCPOptions {
 			dhcpOptions := kubevirt.ComposeDHCPv6Options(
 				t.cidr,
-				DefaultNetworkControllerName,
+				ovntypes.DefaultNetworkControllerName,
 				ktypes.NamespacedName{
 					Namespace: namespace,
 					Name:      t.hostname,
@@ -342,8 +386,35 @@ var _ = Describe("OVN Kubevirt Operations", func() {
 				ExternalIDs: ids,
 			}
 		}
+		composeNats = func(pod testVirtLauncherPod) ([]string, []*nbdb.NAT) {
+			var ids []string
+			var nats []*nbdb.NAT
+			if config.IPv4Mode {
+				id := pod.podName + "-IPv4-NAD-UUID"
+				nats = append(nats, &nbdb.NAT{
+					UUID:       id,
+					LogicalIP:  pod.addressIPv4,
+					ExternalIP: testing.MustParseIPNet(nodeByName[pod.nodeName].addressIPv4).IP.String(),
+					Options:    map[string]string{"stateless": "false"},
+					Type:       "snat",
+				})
+				ids = append(ids, id)
+			}
+			if config.IPv6Mode {
+				id := pod.podName + "-IPv6-NAD-UUID"
+				nats = append(nats, &nbdb.NAT{
+					UUID:       id,
+					LogicalIP:  pod.addressIPv6,
+					ExternalIP: testing.MustParseIPNet(nodeByName[pod.nodeName].addressIPv6).IP.String(),
+					Options:    map[string]string{"stateless": "false"},
+					Type:       "snat",
+				})
+				ids = append(ids, id)
+			}
+			return ids, nats
+		}
 
-		expectedNBDBAfterCleanup = func(expectedStaticRoutes []*nbdb.LogicalRouterStaticRoute) []libovsdb.TestData {
+		expectedNBDBAfterCleanup = func(expectedStaticRoutes []*nbdb.LogicalRouterStaticRoute, expectedNATs map[string][]*nbdb.NAT) []libovsdb.TestData {
 			data := []libovsdb.TestData{}
 			expectedPoliciesAfterCleanup := []string{}
 			expectedStaticRoutesAfterCleanup := []string{}
@@ -366,6 +437,11 @@ var _ = Describe("OVN Kubevirt Operations", func() {
 					continue
 				} else if lr, ok := nbData.(*nbdb.LogicalRouter); ok && lr.Name == ovntypes.OVNClusterRouter {
 					expectedOvnClusterRouterAfterCleanup = lr
+				} else if lr, ok := nbData.(*nbdb.LogicalRouter); ok && expectedNATs[lr.Name] != nil {
+					for _, nat := range expectedNATs[lr.Name] {
+						lr.Nat = append(lr.Nat, nat.UUID)
+						data = append(data, nat)
+					}
 				}
 				data = append(data, nbData)
 			}
@@ -393,14 +469,14 @@ var _ = Describe("OVN Kubevirt Operations", func() {
 				addressIPv4 = vmByName[t.vmName].addressIPv4
 				addresses = addressIPv4
 				mac = util.IPAddrToHWAddr(net.ParseIP(addressIPv4)).String()
-				nodeGWIP = kubevirt.ARPProxyIPv4
+				nodeGWIP = nodeByName[t.nodeName].gwIPv4
 			} else if config.IPv6Mode && !config.IPv4Mode {
 				subnetIPv6 = nodeByName[t.nodeName].subnetIPv6
 				subnets = subnetIPv6
 				addressIPv6 = vmByName[t.vmName].addressIPv6
 				addresses = addressIPv6
 				mac = util.IPAddrToHWAddr(net.ParseIP(addressIPv6)).String()
-				nodeGWIP = kubevirt.ARPProxyIPv6
+				nodeGWIP = nodeByName[t.nodeName].gwIPv6
 			} else if config.IPv4Mode && config.IPv6Mode {
 				subnetIPv4 = nodeByName[t.nodeName].subnetIPv4
 				subnetIPv6 = nodeByName[t.nodeName].subnetIPv6
@@ -409,7 +485,7 @@ var _ = Describe("OVN Kubevirt Operations", func() {
 				addressIPv6 = vmByName[t.vmName].addressIPv6
 				addresses = addressIPv4 + " " + addressIPv6
 				mac = util.IPAddrToHWAddr(net.ParseIP(addressIPv4)).String()
-				nodeGWIP = kubevirt.ARPProxyIPv4 + " " + kubevirt.ARPProxyIPv6
+				nodeGWIP = nodeByName[t.nodeName].gwIPv4 + " " + nodeByName[t.nodeName].gwIPv6
 			}
 			labels := map[string]string{
 				kubevirtv1.VirtualMachineNameLabel: t.vmName,
@@ -424,7 +500,6 @@ var _ = Describe("OVN Kubevirt Operations", func() {
 			for k, v := range t.extraAnnotations {
 				annotations[k] = v
 			}
-
 			t.testPod = newTPod(t.nodeName, subnets, "", nodeGWIP, "virt-launcher-"+t.suffix, addresses, mac, "namespace1")
 			t.annotations = annotations
 			t.labels = labels
@@ -487,6 +562,7 @@ var _ = Describe("OVN Kubevirt Operations", func() {
 
 		// To skip port group not found error
 		config.EnableMulticast = false
+		config.Gateway.DisableSNATMultipleGWs = true
 
 		fakeOvn = NewFakeOVN(true)
 	})
@@ -497,6 +573,12 @@ var _ = Describe("OVN Kubevirt Operations", func() {
 
 	Context("during execution", func() {
 		DescribeTable("reconcile migratable vm pods", func(t testData) {
+			var (
+				logicalSwitch                            *nbdb.LogicalSwitch
+				ovnClusterRouter                         *nbdb.LogicalRouter
+				logicalRouterPort                        *nbdb.LogicalRouterPort
+				migrationSourceLSRP, migrationTargetLSRP *nbdb.LogicalSwitchPort
+			)
 
 			_, parsedClusterCIDRIPv4, err := net.ParseCIDR(clusterCIDRIPv4)
 			Expect(err).ToNot(HaveOccurred())
@@ -540,8 +622,8 @@ var _ = Describe("OVN Kubevirt Operations", func() {
 				UUID: ovntypes.SwitchToRouterPrefix + t.nodeName + "-UUID",
 				Type: "router",
 				Options: map[string]string{
-					"router-port": logicalRouterPort.Name,
-					"arp_proxy":   kubevirt.ComposeARPProxyLSPOption(),
+					libovsdbops.RouterPort: logicalRouterPort.Name,
+					"arp_proxy":            kubevirt.ComposeARPProxyLSPOption(),
 				},
 			}
 			logicalSwitch = &nbdb.LogicalSwitch{
@@ -570,7 +652,7 @@ var _ = Describe("OVN Kubevirt Operations", func() {
 			}
 
 			for i, d := range t.dhcpv4 {
-				initialDB.NBData = append(initialDB.NBData, ComposeDHCPv4Options(fmt.Sprintf("dhcpv4%d%s", i, d.hostname), t.namespace, &d))
+				initialDB.NBData = append(initialDB.NBData, ComposeDHCPv4Options(fmt.Sprintf("dhcpv4%d%s", i, d.hostname), t.namespace, t.nodeName, &d))
 			}
 
 			for i, d := range t.dhcpv6 {
@@ -600,8 +682,8 @@ var _ = Describe("OVN Kubevirt Operations", func() {
 					UUID: ovntypes.SwitchToRouterPrefix + t.migrationTarget.nodeName + "-UUID",
 					Type: "router",
 					Options: map[string]string{
-						"router-port": migrationTargetLRP.Name,
-						"arp_proxy":   kubevirt.ComposeARPProxyLSPOption(),
+						libovsdbops.RouterPort: migrationTargetLRP.Name,
+						"arp_proxy":            kubevirt.ComposeARPProxyLSPOption(),
 					},
 				}
 				migrationTargetLS = &nbdb.LogicalSwitch{
@@ -642,7 +724,7 @@ var _ = Describe("OVN Kubevirt Operations", func() {
 				fakeOvn.startWithDBSetup(initialDB,
 					&corev1.NamespaceList{
 						Items: []corev1.Namespace{
-							*newNamespace(t.namespace),
+							*testing.NewNamespace(t.namespace),
 						},
 					},
 					&corev1.PodList{
@@ -665,6 +747,9 @@ var _ = Describe("OVN Kubevirt Operations", func() {
 									Annotations: map[string]string{
 										"k8s.ovn.org/node-transit-switch-port-ifaddr": fmt.Sprintf(`{"ipv4": %q, "ipv6": %q}`, nodeByName[node1].transitSwitchPortIPv4, nodeByName[node1].transitSwitchPortIPv6),
 										"k8s.ovn.org/node-subnets":                    fmt.Sprintf(`{"default":[%q,%q]}`, nodeByName[node1].subnetIPv4, nodeByName[node1].subnetIPv6),
+										"k8s.ovn.org/l3-gateway-config":               fmt.Sprintf(`{"default": {"mode": "local", "mac-address":"7e:57:f8:f0:3c:51", "ip-addresses":[%q, %q]}}`, nodeByName[node1].addressIPv4, nodeByName[node1].addressIPv6),
+										"k8s.ovn.org/node-chassis-id":                 chassisIDForNode(node1),
+										util.OvnNodeID:                                nodeByName[node1].nodeID,
 									},
 								},
 							},
@@ -674,6 +759,9 @@ var _ = Describe("OVN Kubevirt Operations", func() {
 									Annotations: map[string]string{
 										"k8s.ovn.org/node-transit-switch-port-ifaddr": fmt.Sprintf(`{"ipv4": %q, "ipv6": %q}`, nodeByName[node2].transitSwitchPortIPv4, nodeByName[node2].transitSwitchPortIPv6),
 										"k8s.ovn.org/node-subnets":                    fmt.Sprintf(`{"default":[%q,%q]}`, nodeByName[node2].subnetIPv4, nodeByName[node2].subnetIPv6),
+										"k8s.ovn.org/l3-gateway-config":               fmt.Sprintf(`{"default": {"mode": "local", "mac-address":"7e:57:f8:f0:3c:52", "ip-addresses":[%q, %q]}}`, nodeByName[node2].addressIPv4, nodeByName[node2].addressIPv6),
+										"k8s.ovn.org/node-chassis-id":                 chassisIDForNode(node2),
+										util.OvnNodeID:                                nodeByName[node2].nodeID,
 									},
 								},
 							},
@@ -683,6 +771,9 @@ var _ = Describe("OVN Kubevirt Operations", func() {
 									Annotations: map[string]string{
 										"k8s.ovn.org/node-transit-switch-port-ifaddr": fmt.Sprintf(`{"ipv4": %q, "ipv6": %q}`, nodeByName[node3].transitSwitchPortIPv4, nodeByName[node3].transitSwitchPortIPv6),
 										"k8s.ovn.org/node-subnets":                    fmt.Sprintf(`{"default":[%q,%q]}`, nodeByName[node3].subnetIPv4, nodeByName[node3].subnetIPv6),
+										"k8s.ovn.org/l3-gateway-config":               fmt.Sprintf(`{"default": {"mode": "local", "mac-address":"7e:57:f8:f0:3c:53", "ip-addresses":[%q, %q]}}`, nodeByName[node3].addressIPv4, nodeByName[node3].addressIPv6),
+										"k8s.ovn.org/node-chassis-id":                 chassisIDForNode(node3),
+										util.OvnNodeID:                                nodeByName[node3].nodeID,
 									},
 								},
 							},
@@ -740,6 +831,7 @@ var _ = Describe("OVN Kubevirt Operations", func() {
 				}
 
 				expectedOVN := []libovsdb.TestData{}
+
 				ovnClusterRouter.Policies = []string{}
 				expectedOVNClusterRouter := ovnClusterRouter.DeepCopy()
 				expectedOVNClusterRouter.Policies = []string{}
@@ -765,30 +857,45 @@ var _ = Describe("OVN Kubevirt Operations", func() {
 					expectedOVN = append(expectedOVN, expectedStaticRoute)
 				}
 				for _, d := range t.expectedDhcpv4 {
-					expectedOVN = append(expectedOVN, ComposeDHCPv4Options(dhcpv4OptionsUUID+d.hostname, t.namespace, &d))
+					expectedOVN = append(expectedOVN, ComposeDHCPv4Options(dhcpv4OptionsUUID+d.hostname, t.namespace, t.nodeName, &d))
 				}
 
 				for _, d := range t.expectedDhcpv6 {
 					expectedOVN = append(expectedOVN, ComposeDHCPv6Options(dhcpv6OptionsUUID+d.hostname, t.namespace, &d))
 				}
 				expectedSourceLSRP := migrationSourceLSRP.DeepCopy()
+				expectedGWRouter := gwRouter.DeepCopy()
 				expectedOVN = append(expectedOVN,
 					expectedOVNClusterRouter,
-					gwRouter,
+					expectedGWRouter,
 					logicalRouterPort,
 					expectedSourceLSRP,
 				)
 				expectedOVN = kubevirtOVNTestData(t, expectedOVN)
 
+				var expectedMigrationTargetGWRouter *nbdb.LogicalRouter
 				if t.migrationTarget.nodeName != "" {
 					expectedTargetLSRP := migrationTargetLSRP.DeepCopy()
+					expectedMigrationTargetGWRouter = migrationTargetGWRouter.DeepCopy()
 					expectedOVN = append(expectedOVN,
 						migrationTargetLRP,
 						expectedTargetLSRP,
-						migrationTargetGWRouter,
+						expectedMigrationTargetGWRouter,
 					)
 				}
+
+				for router, testpod := range map[*nbdb.LogicalRouter]testVirtLauncherPod{expectedGWRouter: t.testVirtLauncherPod, expectedMigrationTargetGWRouter: t.migrationTarget.testVirtLauncherPod} {
+					if _, isLocal := fakeOvn.controller.localZoneNodes.Load(testpod.nodeName); isLocal && router != nil && testpod.podName != "" {
+						natIDs, nats := composeNats(testpod)
+						router.Nat = append(router.Nat, natIDs...)
+						for _, nat := range nats {
+							expectedOVN = append(expectedOVN, nat)
+						}
+					}
+				}
+
 				Eventually(fakeOvn.nbClient).Should(libovsdb.HaveData(expectedOVN), "should populate ovn")
+
 				if t.replaceNode != "" {
 					By("Replace vm node with newNode at the logical switch manager")
 					newNode := &corev1.Node{
@@ -796,7 +903,7 @@ var _ = Describe("OVN Kubevirt Operations", func() {
 							Name: "newNode1",
 							Annotations: map[string]string{
 								"k8s.ovn.org/node-subnets": fmt.Sprintf(`{"default":[%q,%q]}`, nodeByName[t.replaceNode].subnetIPv4, nodeByName[t.replaceNode].subnetIPv6),
-								util.OVNNodeGRLRPAddrs:     "{\"default\":{\"ipv4\":\"100.64.0.2/16\"}}",
+								util.OvnNodeID:             nodeByName[t.replaceNode].nodeID,
 							},
 						},
 					}
@@ -821,26 +928,87 @@ var _ = Describe("OVN Kubevirt Operations", func() {
 					Expect(err).ToNot(HaveOccurred())
 				}
 
-				if t.podName != "" {
-					pod, err := fakeOvn.fakeClient.KubeClient.CoreV1().Pods(t.namespace).Get(context.TODO(), t.podName, metav1.GetOptions{})
+				var vmIPs []string
+				if t.addressIPv4 != "" {
+					vmIPs = append(vmIPs, t.addressIPv4+subnetSuffixIPv4)
+				}
+				if t.addressIPv6 != "" {
+					vmIPs = append(vmIPs, t.addressIPv6+subnetSuffixIPv6)
+				}
+				vmIPNets := testing.MustParseIPNets(vmIPs...)
+				subnet, checkRelease := fakeOvn.controller.lsManager.GetSubnetName(vmIPNets)
+
+				if t.podName == "" {
+					return nil
+				}
+
+				completeAndDeletePod := func(namespace, name string) {
+					GinkgoHelper()
+					pod, err := fakeOvn.fakeClient.KubeClient.CoreV1().Pods(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 					Expect(err).NotTo(HaveOccurred())
 					pod.Status.Phase = corev1.PodSucceeded
-					_, err = fakeOvn.fakeClient.KubeClient.CoreV1().Pods(t.namespace).UpdateStatus(context.TODO(), pod, metav1.UpdateOptions{})
+					_, err = fakeOvn.fakeClient.KubeClient.CoreV1().Pods(namespace).UpdateStatus(context.TODO(), pod, metav1.UpdateOptions{})
 					Expect(err).NotTo(HaveOccurred())
-					err = fakeOvn.fakeClient.KubeClient.CoreV1().Pods(t.namespace).Delete(context.TODO(), t.podName, metav1.DeleteOptions{})
+					err = fakeOvn.fakeClient.KubeClient.CoreV1().Pods(namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
 					Expect(err).NotTo(HaveOccurred())
-
-					if t.migrationTarget.nodeName != "" {
-						pod, err := fakeOvn.fakeClient.KubeClient.CoreV1().Pods(t.namespace).Get(context.TODO(), t.migrationTarget.podName, metav1.GetOptions{})
-						Expect(err).NotTo(HaveOccurred())
-						pod.Status.Phase = corev1.PodSucceeded
-						_, err = fakeOvn.fakeClient.KubeClient.CoreV1().Pods(t.namespace).UpdateStatus(context.TODO(), pod, metav1.UpdateOptions{})
-						Expect(err).NotTo(HaveOccurred())
-						err = fakeOvn.fakeClient.KubeClient.CoreV1().Pods(t.namespace).Delete(context.TODO(), t.migrationTarget.podName, metav1.DeleteOptions{})
-						Expect(err).NotTo(HaveOccurred())
-					}
-					Eventually(fakeOvn.nbClient).Should(libovsdb.HaveData(expectedNBDBAfterCleanup(expectedStaticRoutes)), "should cleanup ovn")
 				}
+
+				deleteFirst := t.testVirtLauncherPod
+				deleteSecond := t.migrationTarget.testVirtLauncherPod
+				deleteFirstRouter := gwRouter
+				hasMigration := t.migrationTarget.nodeName != ""
+				hasUnsuccesfulMigration := hasMigration && t.migrationTarget.updatePhase != nil
+				if hasUnsuccesfulMigration {
+					deleteFirst = t.migrationTarget.testVirtLauncherPod
+					deleteFirstRouter = migrationTargetGWRouter
+					deleteSecond = t.testVirtLauncherPod
+				}
+
+				completeAndDeletePod(t.namespace, deleteFirst.podName)
+				if !hasMigration {
+					if checkRelease {
+						Eventually(fakeOvn.controller.lsManager.AllocateIPs).
+							WithArguments(subnet, vmIPNets).
+							Should(Succeed(), "should have de-allocated VM IP after termination")
+					}
+					Eventually(fakeOvn.nbClient).Should(
+						libovsdb.HaveData(expectedNBDBAfterCleanup(expectedStaticRoutes, nil)),
+						"should cleanup terminated pod data from ovn",
+					)
+					return nil
+				}
+				if checkRelease {
+					Consistently(fakeOvn.controller.lsManager.AllocateIPs).
+						WithArguments(subnet, vmIPNets).
+						ShouldNot(Succeed(), "should have not de-allocated VM IP after migration")
+				}
+
+				Eventually(fakeOvn.nbClient).Should(
+					libovsdb.HaveData(filterOutStaleVirtLauncherExpectedTestData(t.namespace, deleteFirst.podName, expectedOVN)),
+					"should cleanup source pod data from ovn",
+				)
+
+				completeAndDeletePod(t.namespace, deleteSecond.podName)
+				if checkRelease {
+					Eventually(fakeOvn.controller.lsManager.AllocateIPs).
+						WithArguments(subnet, vmIPNets).
+						Should(Succeed(), "should have de-allocated target VM IP after termination")
+				}
+
+				// FIXME: for some reason we don't remove stale NATs of migrated
+				// VMs. One possible reason is if VMs can migrate within the
+				// same node and we can race between creation and deletion. Can
+				// it happen?
+				// https://github.com/ovn-kubernetes/ovn-kubernetes/issues/5627
+				expectedNATs := map[string][]*nbdb.NAT{}
+				if _, isLocal := fakeOvn.controller.localZoneNodes.Load(deleteFirst.nodeName); isLocal {
+					_, nats := composeNats(deleteFirst)
+					expectedNATs[deleteFirstRouter.Name] = nats
+				}
+				Eventually(fakeOvn.nbClient).Should(
+					libovsdb.HaveData(expectedNBDBAfterCleanup(expectedStaticRoutes, expectedNATs)),
+					"should cleanup terminated target pod data from ovn",
+				)
 
 				return nil
 			}
@@ -1252,7 +1420,18 @@ var _ = Describe("OVN Kubevirt Operations", func() {
 						zone:    kubevirt.OvnRemoteZone,
 					},
 				},
-				testVirtLauncherPod: virtLauncher2(node1, vm1),
+				testVirtLauncherPod: testVirtLauncherPod{
+					suffix: "1",
+					testPod: testPod{
+						nodeName: node2,
+					},
+					vmName:             vm1,
+					skipPodAnnotations: false, /* add ovn pod annotation */
+				},
+				migrationTarget: testMigrationTarget{
+					lrpNetworks:         []string{nodeByName[node1].lrpNetworkIPv4, nodeByName[node1].lrpNetworkIPv6},
+					testVirtLauncherPod: virtLauncher2(node1, vm1),
+				},
 				expectedDhcpv4: []testDHCPOptions{{
 					cidr:     nodeByName[node1].subnetIPv4,
 					dns:      dnsServiceIPv4,

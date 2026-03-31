@@ -1,17 +1,14 @@
 package metrics
 
 import (
-	"context"
 	"strings"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 const (
@@ -113,23 +110,14 @@ var ovnNorthdStopwatchShowMetricsMap = map[string]*stopwatchMetricDetails{
 	"ovnsb_db_run":     {},
 }
 
-func RegisterOvnNorthdMetrics(clientset kubernetes.Interface, k8sNodeName string, stopChan <-chan struct{}) {
-	err := wait.PollUntilContextTimeout(context.Background(), 1*time.Second, 300*time.Second, true, func(_ context.Context) (bool, error) {
-		return checkPodRunsOnGivenNode(clientset, []string{"ovn-db-pod=true"}, k8sNodeName, true)
-	})
-	if err != nil {
-		klog.Infof("Not registering OVN North Metrics because OVNKube Master Pod was not found running on this "+
-			"node (%s)", k8sNodeName)
-		return
-	}
-	klog.Info("Found OVNKube Master Pod running on this node. Registering OVN North Metrics")
-
+// RegisterOvnNorthdMetrics registers the ovn-northd metrics
+func RegisterOvnNorthdMetrics(ovnRegistry prometheus.Registerer) {
 	// ovn-northd metrics
 	getOvnNorthdVersionInfo()
 	ovnRegistry.MustRegister(prometheus.NewGaugeFunc(
 		prometheus.GaugeOpts{
-			Namespace: MetricOvnNamespace,
-			Subsystem: MetricOvnSubsystemNorthd,
+			Namespace: types.MetricOvnNamespace,
+			Subsystem: types.MetricOvnSubsystemNorthd,
 			Name:      "build_info",
 			Help: "A metric with a constant '1' value labeled by version and library " +
 				"from which ovn binaries were built",
@@ -142,8 +130,8 @@ func RegisterOvnNorthdMetrics(clientset kubernetes.Interface, k8sNodeName string
 	))
 	ovnRegistry.MustRegister(prometheus.NewGaugeFunc(
 		prometheus.GaugeOpts{
-			Namespace: MetricOvnNamespace,
-			Subsystem: MetricOvnSubsystemNorthd,
+			Namespace: types.MetricOvnNamespace,
+			Subsystem: types.MetricOvnSubsystemNorthd,
 			Name:      "status",
 			Help:      "Specifies whether this instance of ovn-northd is standby(0) or active(1) or paused(2).",
 		}, func() float64 {
@@ -169,8 +157,8 @@ func RegisterOvnNorthdMetrics(clientset kubernetes.Interface, k8sNodeName string
 	))
 	ovnRegistry.MustRegister(prometheus.NewGaugeFunc(
 		prometheus.GaugeOpts{
-			Namespace: MetricOvnNamespace,
-			Subsystem: MetricOvnSubsystemNorthd,
+			Namespace: types.MetricOvnNamespace,
+			Subsystem: types.MetricOvnSubsystemNorthd,
 			Name:      "nb_connection_status",
 			Help:      "Specifies nb-connection-status of ovn-northd, not connected(0) or connected(1).",
 		}, func() float64 {
@@ -179,8 +167,8 @@ func RegisterOvnNorthdMetrics(clientset kubernetes.Interface, k8sNodeName string
 	))
 	ovnRegistry.MustRegister(prometheus.NewGaugeFunc(
 		prometheus.GaugeOpts{
-			Namespace: MetricOvnNamespace,
-			Subsystem: MetricOvnSubsystemNorthd,
+			Namespace: types.MetricOvnNamespace,
+			Subsystem: types.MetricOvnSubsystemNorthd,
 			Name:      "sb_connection_status",
 			Help:      "Specifies sb-connection-status of ovn-northd, not connected(0) or connected(1).",
 		}, func() float64 {
@@ -190,11 +178,9 @@ func RegisterOvnNorthdMetrics(clientset kubernetes.Interface, k8sNodeName string
 
 	// Register the ovn-northd coverage/show metrics with prometheus
 	componentCoverageShowMetricsMap[ovnNorthd] = ovnNorthdCoverageShowMetricsMap
-	registerCoverageShowMetrics(ovnNorthd, MetricOvnNamespace, MetricOvnSubsystemNorthd)
-	go coverageShowMetricsUpdater(ovnNorthd, stopChan)
+	registerCoverageShowMetrics(ovnRegistry, ovnNorthd, types.MetricOvnNamespace, types.MetricOvnSubsystemNorthd)
 
 	// Register the ovn-northd stopwatch/show metrics with prometheus
 	componentStopwatchShowMetricsMap[ovnNorthd] = ovnNorthdStopwatchShowMetricsMap
-	registerStopwatchShowMetrics(ovnNorthd, MetricOvnNamespace, MetricOvnSubsystemNorthd)
-	go stopwatchShowMetricsUpdater(ovnNorthd, stopChan)
+	registerStopwatchShowMetrics(ovnRegistry, ovnNorthd, types.MetricOvnNamespace, types.MetricOvnSubsystemNorthd)
 }

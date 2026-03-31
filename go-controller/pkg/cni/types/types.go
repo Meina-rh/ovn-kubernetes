@@ -24,17 +24,25 @@ type NetConf struct {
 	NADName string `json:"netAttachDefName,omitempty"`
 	// Network MTU
 	MTU int `json:"mtu,omitempty"`
-	// comma-seperated subnet cidr
+	// comma-separated subnet cidr
 	// for secondary layer3 network, eg. 10.128.0.0/14/23
 	// for layer2 and localnet network, eg. 10.1.130.0/24
 	Subnets string `json:"subnets,omitempty"`
-	// comma-seperated list of IPs, expressed in the form of subnets, to be excluded from being allocated for Pod
+	// comma-separated list of subnets, to be excluded from being allocated for Pod
 	// valid for layer2 and localnet network topology
 	// eg. "10.1.130.0/27, 10.1.130.122/32"
 	ExcludeSubnets string `json:"excludeSubnets,omitempty"`
+	// comma-separated list of subnets, to be reserved for static IP assignment
+	// valid for layer2 topology only
+	// eg. "10.1.130.0/27, 10.1.130.122/32"
+	ReservedSubnets string `json:"reservedSubnets,omitempty"`
+	// comma-separated list of subnets, to be reserved for OVN-Kubernetes internal network infrastructure
+	// valid for layer2 network topology with primary role only
+	// eg. "10.1.130.0/30, 10.1.130.64/30"
+	InfrastructureSubnets string `json:"infrastructureSubnets,omitempty"`
 	// join subnet cidr is required for supporting
 	// services and ingress for user defined networks
-	// in case of dualstack cluster, please do a comma-seperated list
+	// in case of dualstack cluster, please do a comma-separated list
 	// expected format:
 	// 1) V4 single stack: "v4CIDR" (eg: "100.65.0.0/16")
 	// 2) V6 single stack: "v6CIDR" (eg: "fd99::/64")
@@ -42,6 +50,20 @@ type NetConf struct {
 	// valid for UDN layer3/layer2 network topology
 	// default value: 100.65.0.0/16,fd99::/64 if not provided
 	JoinSubnet string `json:"joinSubnet,omitempty"`
+	// transit subnet cidr was previously internally set to the default value,
+	// but with the recent layer2 topology changes it may overlap with the network Subnet.
+	// To avoid that, transit subnet is now configurable. Only used by Primary Layer2 networks.
+	// in case of dualstack cluster, please do a comma-separated list
+	TransitSubnet string `json:"transitSubnet,omitempty"`
+	// comma-separated list of default gateway IPs for layer2 primary networks
+	// in case of dualstack cluster, please do a comma-separated list
+	// expected format:
+	// 1) V4 single stack: "10.128.0.1"
+	// 2) V6 single stack: "2001:db8::1"
+	// 3) dualstack: "10.128.0.1,2001:db8::1"
+	// valid for layer2 primary network topology only
+	// when omitted, the .1 address from the subnet is used
+	DefaultGatewayIPs string `json:"defaultGatewayIPs,omitempty"`
 	// VLANID, valid in localnet topology network only
 	VLANID int `json:"vlanID,omitempty"`
 	// AllowPersistentIPs is valid on both localnet / layer topologies.
@@ -57,6 +79,15 @@ type NetConf struct {
 	// This attribute allows multiple overlays to share the same physical
 	// network mapping in the hosts.
 	PhysicalNetworkName string `json:"physicalNetworkName,omitempty"`
+
+	// Transport describes the transport protocol for east-west traffic.
+	// Valid values are "no-overlay" and "evpn".
+	// When omitted, the default OVN overlay transport is used.
+	Transport string `json:"transport,omitempty"`
+
+	// EVPNConfig contains configuration for EVPN mode.
+	// Only valid when Transport is "evpn".
+	EVPN *EVPNConfig `json:"evpn,omitempty"`
 
 	// PciAddrs in case of using sriov or Auxiliry device name in case of SF
 	DeviceID string `json:"deviceID,omitempty"`
@@ -78,6 +109,27 @@ type NetConf struct {
 		// see https://github.com/k8snetworkplumbingwg/device-info-spec
 		CNIDeviceInfoFile string `json:"CNIDeviceInfoFile,omitempty"`
 	} `json:"runtimeConfig,omitempty"`
+}
+
+// EVPNConfig contains EVPN-specific configuration for the network.
+type EVPNConfig struct {
+	// VTEP is the name of the VTEP CR that defines VTEP IPs for EVPN.
+	VTEP string `json:"vtep"`
+	// MACVRF contains the MAC-VRF configuration for Layer 2 EVPN.
+	MACVRF *VRFConfig `json:"macVRF,omitempty"`
+	// IPVRF contains the IP-VRF configuration for Layer 3 EVPN.
+	IPVRF *VRFConfig `json:"ipVRF,omitempty"`
+}
+
+// VRFConfig contains configuration for a VRF in EVPN.
+type VRFConfig struct {
+	// VNI is the VXLAN Network Identifier for this VRF.
+	VNI int32 `json:"vni"`
+	// RouteTarget is the BGP route target for this VRF.
+	RouteTarget string `json:"routeTarget,omitempty"`
+	// VID is the VLAN ID used for local traffic segmentation on each node.
+	// Allocated cluster-wide by the UDN controller, one per VRF.
+	VID int `json:"vid,omitempty"`
 }
 
 // NetworkSelectionElement represents one element of the JSON format

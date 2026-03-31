@@ -2,13 +2,16 @@
 
 package v1
 
-// CloudPrivateIPConfigSpecApplyConfiguration represents an declarative configuration of the CloudPrivateIPConfigSpec type for use
+// CloudPrivateIPConfigSpecApplyConfiguration represents a declarative configuration of the CloudPrivateIPConfigSpec type for use
 // with apply.
+//
+// CloudPrivateIPConfigSpec consists of a node name which the private IP should be assigned to.
 type CloudPrivateIPConfigSpecApplyConfiguration struct {
+	// node is the node name, as specified by the Kubernetes field: node.metadata.name
 	Node *string `json:"node,omitempty"`
 }
 
-// CloudPrivateIPConfigSpecApplyConfiguration constructs an declarative configuration of the CloudPrivateIPConfigSpec type for use with
+// CloudPrivateIPConfigSpecApplyConfiguration constructs a declarative configuration of the CloudPrivateIPConfigSpec type for use with
 // apply.
 func CloudPrivateIPConfigSpec() *CloudPrivateIPConfigSpecApplyConfiguration {
 	return &CloudPrivateIPConfigSpecApplyConfiguration{}

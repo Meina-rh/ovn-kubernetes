@@ -10,8 +10,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/infraprovider"
+	e2eendpointslice "k8s.io/kubernetes/test/e2e/framework/endpointslice"
+
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/feature"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -35,7 +39,7 @@ const (
 // Validate that Services with the well-known annotation k8s.ovn.org/idled-at
 // generate a NeedPods Event if the service doesn´t have endpoints and
 // OVN EmptyLB-Backends feature is enabled
-var _ = ginkgo.Describe("Unidling", func() {
+var _ = ginkgo.Describe("Unidling", feature.Unidle, func() {
 
 	const (
 		serviceName       = "empty-service"
@@ -68,7 +72,8 @@ var _ = ginkgo.Describe("Unidling", func() {
 
 		// Add a backend pod to the service in one node
 		ginkgo.By("creating a backend pod for the service " + serviceName)
-		serverPod := e2epod.NewAgnhostPod(namespace, "pod-backend", nil, nil, []v1.ContainerPort{{ContainerPort: 9376}}, "serve-hostname")
+		serverPodPort := infraprovider.Get().GetK8HostPort()
+		serverPod := e2epod.NewAgnhostPod(namespace, "pod-backend", nil, nil, []v1.ContainerPort{{ContainerPort: int32(serverPodPort)}}, "serve-hostname")
 		serverPod.Labels = jig.Labels
 		serverPod.Spec.NodeName = nodeName
 		e2epod.NewPodClient(f).CreateSync(context.TODO(), serverPod)
@@ -192,7 +197,7 @@ var _ = ginkgo.Describe("Unidling", func() {
 		ginkgo.It("Should generate a NeedPods event when backends were added and then removed", func() {
 			be := createBackend(f, serviceName, namespace, node, jig.Labels, port)
 			e2epod.NewPodClient(f).DeleteSync(context.TODO(), be.Name, metav1.DeleteOptions{}, e2epod.DefaultPodDeletionTimeout)
-			err := framework.WaitForServiceEndpointsNum(context.TODO(), f.ClientSet, f.Namespace.Name, serviceName, 0, time.Second, wait.ForeverTestTimeout)
+			err := e2eendpointslice.WaitForEndpointCount(context.TODO(), f.ClientSet, f.Namespace.Name, serviceName, 0)
 			framework.ExpectNoError(err)
 
 			gomega.Eventually(func() serviceStatus {
@@ -308,7 +313,7 @@ var _ = ginkgo.Describe("Unidling", func() {
 		ginkgo.It("Should not generate a NeedPods event when backends were added and then removed", func() {
 			be := createBackend(f, serviceName, namespace, node, jig.Labels, port)
 			e2epod.NewPodClient(f).DeleteSync(context.TODO(), be.Name, metav1.DeleteOptions{}, e2epod.DefaultPodDeletionTimeout)
-			err := framework.WaitForServiceEndpointsNum(context.TODO(), f.ClientSet, f.Namespace.Name, serviceName, 0, time.Second, wait.ForeverTestTimeout)
+			err := e2eendpointslice.WaitForEndpointCount(context.TODO(), f.ClientSet, f.Namespace.Name, serviceName, 0)
 			framework.ExpectNoError(err)
 
 			gomega.Eventually(func() serviceStatus {
@@ -330,7 +335,7 @@ func createBackend(f *framework.Framework, serviceName, namespace, node string, 
 	serverPod.Labels = labels
 	serverPod.Spec.NodeName = node
 	pod := e2epod.NewPodClient(f).CreateSync(context.TODO(), serverPod)
-	err := framework.WaitForServiceEndpointsNum(context.TODO(), f.ClientSet, f.Namespace.Name, serviceName, 1, time.Second, wait.ForeverTestTimeout)
+	err := e2eendpointslice.WaitForEndpointCount(context.TODO(), f.ClientSet, f.Namespace.Name, serviceName, 1)
 	framework.ExpectNoError(err)
 	return pod
 }

@@ -11,22 +11,21 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/cache"
 
-	ovncnitypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/cni/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	ovntest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing"
-	ovntypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
+	ovncnitypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/cni/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	ovntest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing"
+	ovntypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
 )
 
-func TestParseSubnets(t *testing.T) {
+func TestParseNetworkSubnets(t *testing.T) {
 	tests := []struct {
-		desc             string
-		topology         string
-		subnets          string
-		excludes         string
-		expectedSubnets  []config.CIDRNetworkEntry
-		expectedExcludes []*net.IPNet
-		expectError      bool
+		desc            string
+		topology        string
+		subnets         string
+		expectedSubnets []config.CIDRNetworkEntry
+		expectError     bool
 	}{
 		{
 			desc:     "multiple subnets layer 3 topology",
@@ -48,10 +47,9 @@ func TestParseSubnets(t *testing.T) {
 			topology: ovntypes.Layer3Topology,
 		},
 		{
-			desc:     "multiple subnets and excludes layer 2 topology",
+			desc:     "multiple subnets layer 2 topology",
 			topology: ovntypes.Layer2Topology,
 			subnets:  "192.168.1.1/26, fda6::/48",
-			excludes: "192.168.1.38/32, fda6::38/128",
 			expectedSubnets: []config.CIDRNetworkEntry{
 				{
 					CIDR: ovntest.MustParseIPNet("192.168.1.0/26"),
@@ -60,31 +58,16 @@ func TestParseSubnets(t *testing.T) {
 					CIDR: ovntest.MustParseIPNet("fda6::/48"),
 				},
 			},
-			expectedExcludes: ovntest.MustParseIPNets("192.168.1.38/32", "fda6::38/128"),
 		},
 		{
 			desc:     "empty subnets layer 2 topology",
 			topology: ovntypes.Layer2Topology,
+			subnets:  "",
 		},
 		{
-			desc:        "invalid formatted excludes layer 2 topology",
-			topology:    ovntypes.Layer2Topology,
-			subnets:     "192.168.1.1/26",
-			excludes:    "192.168.1.1/26/32",
-			expectError: true,
-		},
-		{
-			desc:        "invalid not contained excludes layer 2 topology",
-			topology:    ovntypes.Layer2Topology,
-			subnets:     "fda6::/48",
-			excludes:    "fda7::38/128",
-			expectError: true,
-		},
-		{
-			desc:     "multiple subnets and excludes localnet topology",
+			desc:     "multiple subnets localnet topology",
 			topology: ovntypes.LocalnetTopology,
 			subnets:  "192.168.1.1/26, fda6::/48",
-			excludes: "192.168.1.38/32, fda6::38/128",
 			expectedSubnets: []config.CIDRNetworkEntry{
 				{
 					CIDR: ovntest.MustParseIPNet("192.168.1.0/26"),
@@ -93,24 +76,16 @@ func TestParseSubnets(t *testing.T) {
 					CIDR: ovntest.MustParseIPNet("fda6::/48"),
 				},
 			},
-			expectedExcludes: ovntest.MustParseIPNets("192.168.1.38/32", "fda6::38/128"),
 		},
 		{
 			desc:     "empty subnets localnet topology",
 			topology: ovntypes.LocalnetTopology,
+			subnets:  "",
 		},
 		{
-			desc:        "invalid formatted excludes localnet topology",
-			topology:    ovntypes.LocalnetTopology,
-			subnets:     "fda6::/48",
-			excludes:    "fda6::1/48/128",
-			expectError: true,
-		},
-		{
-			desc:        "invalid not contained excludes localnet topology",
-			topology:    ovntypes.LocalnetTopology,
+			desc:        "unsupported topology",
+			topology:    "unsupported",
 			subnets:     "192.168.1.1/26",
-			excludes:    "192.168.2.38/32",
 			expectError: true,
 		},
 	}
@@ -118,14 +93,95 @@ func TestParseSubnets(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
 			g := gomega.NewWithT(t)
-			subnets, excludes, err := parseSubnets(tc.subnets, tc.excludes, tc.topology)
+
+			subnets, err := parseNetworkSubnets(tc.subnets, tc.topology)
 			if tc.expectError {
 				g.Expect(err).To(gomega.HaveOccurred())
 				return
 			}
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 			g.Expect(subnets).To(gomega.ConsistOf(tc.expectedSubnets))
-			g.Expect(excludes).To(gomega.ConsistOf(tc.expectedExcludes))
+		})
+	}
+}
+
+func TestParseSubnetList(t *testing.T) {
+	tests := []struct {
+		desc            string
+		subnets         string
+		expectedSubnets []*net.IPNet
+		expectError     bool
+	}{
+		{
+			desc:            "multiple subnets",
+			subnets:         "192.168.1.38/32, fda6::38/128",
+			expectedSubnets: ovntest.MustParseIPNets("192.168.1.38/32", "fda6::38/128"),
+		},
+		{
+			desc: "empty subnets",
+		},
+		{
+			desc:        "invalid formatted subnets",
+			subnets:     "192.168.1.1/26/32",
+			expectError: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.desc, func(t *testing.T) {
+			g := gomega.NewWithT(t)
+
+			subnets, err := parseSubnetList(tc.subnets)
+			if tc.expectError {
+				g.Expect(err).To(gomega.HaveOccurred())
+				return
+			}
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(subnets).To(gomega.ConsistOf(tc.expectedSubnets))
+		})
+	}
+}
+
+func TestValidateSubnetContainment(t *testing.T) {
+	tests := []struct {
+		desc             string
+		subnets          []*net.IPNet
+		containerSubnets []config.CIDRNetworkEntry
+		expectError      bool
+	}{
+		{
+			desc:    "valid containment",
+			subnets: ovntest.MustParseIPNets("192.168.1.38/32", "fda6::38/128"),
+			containerSubnets: []config.CIDRNetworkEntry{
+				{CIDR: ovntest.MustParseIPNet("192.168.1.0/26")},
+				{CIDR: ovntest.MustParseIPNet("fda6::/48")},
+			},
+		},
+		{
+			desc:    "invalid containment",
+			subnets: ovntest.MustParseIPNets("fda7::38/128"),
+			containerSubnets: []config.CIDRNetworkEntry{
+				{CIDR: ovntest.MustParseIPNet("fda6::/48")},
+			},
+			expectError: true,
+		},
+		{
+			desc:             "empty subnets",
+			containerSubnets: []config.CIDRNetworkEntry{{CIDR: ovntest.MustParseIPNet("192.168.1.0/26")}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.desc, func(t *testing.T) {
+			g := gomega.NewWithT(t)
+
+			err := validateSubnetContainment(tc.subnets, tc.containerSubnets, config.NewExcludedSubnetNotContainedError)
+			if tc.expectError {
+				g.Expect(err).To(gomega.HaveOccurred())
+				g.Expect(err).To(gomega.BeAssignableToTypeOf(&config.ValidationError{}))
+			} else {
+				g.Expect(err).NotTo(gomega.HaveOccurred())
+			}
 		})
 	}
 }
@@ -180,7 +236,7 @@ func TestParseNetconf(t *testing.T) {
             "netAttachDefName": "default/tenantred"
     }
 `,
-			expectedError: fmt.Errorf("error parsing Network Attachment Definition ns1/nad1: net-attach-def not managed by OVN"),
+			expectedError: fmt.Errorf("net-attach-def not managed by OVN"),
 		},
 		{
 			desc: "attachment definition with IPAM key defined, using a wrong type",
@@ -194,7 +250,7 @@ func TestParseNetconf(t *testing.T) {
             "ipam": "this is wrong"
     }
 `,
-			expectedError: fmt.Errorf("error parsing Network Attachment Definition ns1/nad1: json: cannot unmarshal string into Go struct field NetConf.ipam of type types.IPAM"),
+			expectedError: fmt.Errorf("error parsing Network Attachment Definition ns1/nad1: json: cannot unmarshal string into Go struct field NetConf.NetConf.ipam of type types.IPAM"),
 		},
 		{
 			desc: "attachment definition with IPAM key defined",
@@ -261,7 +317,7 @@ func TestParseNetconf(t *testing.T) {
 			inputNetAttachDefConfigSpec: `
     {
             "name": "tenantred",
-            "cniVersion": "1.0.0",
+            "cniVersion": "1.1.0",
             "plugins": [
               {
                 "type": "ovn-k8s-cni-overlay",
@@ -277,7 +333,7 @@ func TestParseNetconf(t *testing.T) {
 				NADName:  "ns1/nad1",
 				MTU:      1400,
 				VLANID:   10,
-				NetConf:  cnitypes.NetConf{Name: "tenantred", CNIVersion: "1.0.0", Type: "ovn-k8s-cni-overlay"},
+				NetConf:  cnitypes.NetConf{Name: "tenantred", CNIVersion: "1.1.0", Type: "ovn-k8s-cni-overlay"},
 			},
 		},
 		{
@@ -350,13 +406,14 @@ func TestParseNetconf(t *testing.T) {
     }
 `,
 			expectedNetConf: &ovncnitypes.NetConf{
-				Topology:   "layer2",
-				NADName:    "ns1/nad1",
-				MTU:        1400,
-				Role:       "primary",
-				Subnets:    "192.168.200.0/16",
-				NetConf:    cnitypes.NetConf{Name: "tenant-red", Type: "ovn-k8s-cni-overlay"},
-				JoinSubnet: "100.66.0.0/16,fd99::/64",
+				Topology:      "layer2",
+				NADName:       "ns1/nad1",
+				MTU:           1400,
+				Role:          "primary",
+				Subnets:       "192.168.200.0/16",
+				TransitSubnet: config.ClusterManager.V4TransitSubnet,
+				NetConf:       cnitypes.NetConf{Name: "tenant-red", Type: "ovn-k8s-cni-overlay"},
+				JoinSubnet:    "100.66.0.0/16,fd99::/64",
 			},
 		},
 		{
@@ -458,12 +515,116 @@ func TestParseNetconf(t *testing.T) {
 }`,
 			expectedError: fmt.Errorf("the subnet attribute must be defined for layer2 primary user defined networks"),
 		},
+		{
+			desc: "invalid not contained excludes layer 2 topology",
+			inputNetAttachDefConfigSpec: `
+    {
+            "name": "tenantred",
+            "type": "ovn-k8s-cni-overlay",
+            "topology": "layer2",
+            "subnets": "fda6::/48",
+            "excludeSubnets": "fda7::38/128",
+            "netAttachDefName": "ns1/nad1"
+    }
+`,
+			expectedError: fmt.Errorf("invalid subnet configuration: error while parsing subnets: the provided network subnets do not contain excluded subnets fda7::38/128"),
+		},
+		{
+			desc: "multiple subnets and excludes localnet topology",
+			inputNetAttachDefConfigSpec: `
+    {
+            "name": "tenantred",
+            "type": "ovn-k8s-cni-overlay",
+            "topology": "localnet",
+            "subnets": "192.168.1.1/26, fda6::/48",
+            "excludeSubnets": "192.168.1.38/32, fda6::38/128",
+            "netAttachDefName": "ns1/nad1"
+    }
+`,
+			expectedNetConf: &ovncnitypes.NetConf{
+				Topology:       "localnet",
+				NADName:        "ns1/nad1",
+				MTU:            1400,
+				Subnets:        "192.168.1.1/26, fda6::/48",
+				ExcludeSubnets: "192.168.1.38/32, fda6::38/128",
+				NetConf:        cnitypes.NetConf{Name: "tenantred", Type: "ovn-k8s-cni-overlay"},
+			},
+		},
+		{
+			desc: "multiple subnets and reserved subnets layer 2 topology",
+			inputNetAttachDefConfigSpec: `
+    {
+            "name": "tenantred",
+            "type": "ovn-k8s-cni-overlay",
+            "topology": "layer2",
+            "subnets": "192.168.1.0/24, fda6::/64",
+            "reservedSubnets": "192.168.1.0/28, fda6::0/80",
+            "netAttachDefName": "ns1/nad1"
+    }
+`,
+			expectedNetConf: &ovncnitypes.NetConf{
+				Topology:        "layer2",
+				NADName:         "ns1/nad1",
+				MTU:             1400,
+				Subnets:         "192.168.1.0/24, fda6::/64",
+				ReservedSubnets: "192.168.1.0/28, fda6::0/80",
+				NetConf:         cnitypes.NetConf{Name: "tenantred", Type: "ovn-k8s-cni-overlay"},
+			},
+		},
+		{
+			desc: "layer 2 with both excludes and reserved subnets",
+			inputNetAttachDefConfigSpec: `
+    {
+            "name": "tenantred",
+            "type": "ovn-k8s-cni-overlay",
+            "topology": "layer2",
+            "subnets": "192.168.1.0/24",
+            "excludeSubnets": "192.168.1.200/29",
+            "reservedSubnets": "192.168.1.0/28",
+            "netAttachDefName": "ns1/nad1"
+    }
+`,
+			expectedNetConf: &ovncnitypes.NetConf{
+				Topology:        "layer2",
+				NADName:         "ns1/nad1",
+				MTU:             1400,
+				Subnets:         "192.168.1.0/24",
+				ExcludeSubnets:  "192.168.1.200/29",
+				ReservedSubnets: "192.168.1.0/28",
+				NetConf:         cnitypes.NetConf{Name: "tenantred", Type: "ovn-k8s-cni-overlay"},
+			},
+		},
+		{
+			desc: "dual-stack reserved subnets layer 2 topology",
+			inputNetAttachDefConfigSpec: `
+    {
+            "name": "tenantred",
+            "type": "ovn-k8s-cni-overlay",
+            "topology": "layer2",
+            "subnets": "192.168.1.0/24, 2001:db8::/64",
+            "reservedSubnets": "192.168.1.0/28, 2001:db8::/80",
+            "netAttachDefName": "ns1/nad1"
+    }
+`,
+			expectedNetConf: &ovncnitypes.NetConf{
+				Topology:        "layer2",
+				NADName:         "ns1/nad1",
+				MTU:             1400,
+				Subnets:         "192.168.1.0/24, 2001:db8::/64",
+				ReservedSubnets: "192.168.1.0/28, 2001:db8::/80",
+				NetConf:         cnitypes.NetConf{Name: "tenantred", Type: "ovn-k8s-cni-overlay"},
+			},
+		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.desc, func(t *testing.T) {
 			config.IPv4Mode = true
 			config.IPv6Mode = true
+			// Enable feature flags for reserved subnets tests
+			config.OVNKubernetesFeature.EnableMultiNetwork = true
+			config.OVNKubernetesFeature.EnableNetworkSegmentation = true
+			config.OVNKubernetesFeature.EnablePreconfiguredUDNAddresses = true
 			if test.unsupportedReason != "" {
 				t.Skip(test.unsupportedReason)
 			}
@@ -762,6 +923,7 @@ func TestGetPodNADToNetworkMapping(t *testing.T) {
 		inputPodAnnotations           map[string]string
 		expectedError                 error
 		expectedIsAttachmentRequested bool
+		expectedNetworkMapping        map[string]struct{}
 	}
 
 	tests := []testConfig{
@@ -775,6 +937,7 @@ func TestGetPodNADToNetworkMapping(t *testing.T) {
 				NADName:  GetNADName(namespaceName, attachmentName),
 			},
 			expectedIsAttachmentRequested: false,
+			expectedNetworkMapping:        map[string]struct{}{},
 		},
 		{
 			desc: "Looking for a network present in the pod's attachment requests",
@@ -787,9 +950,10 @@ func TestGetPodNADToNetworkMapping(t *testing.T) {
 				nadv1.NetworkAttachmentAnnot: GetNADName(namespaceName, attachmentName),
 			},
 			expectedIsAttachmentRequested: true,
+			expectedNetworkMapping:        map[string]struct{}{GetNADName(namespaceName, attachmentName): {}},
 		},
 		{
-			desc:           "Multiple attachments to the same network in the same pod are not supported",
+			desc:           "Multiple attachments to the same network in the same pod",
 			inputNamespace: namespaceName,
 			inputNetConf: &ovncnitypes.NetConf{
 				NetConf:  cnitypes.NetConf{Name: networkName},
@@ -799,7 +963,11 @@ func TestGetPodNADToNetworkMapping(t *testing.T) {
 			inputPodAnnotations: map[string]string{
 				nadv1.NetworkAttachmentAnnot: fmt.Sprintf("%[1]s,%[1]s", GetNADName(namespaceName, attachmentName)),
 			},
-			expectedError: fmt.Errorf("unexpected error: more than one of the same NAD ns1/attachment1 specified for pod ns1/test-pod"),
+			expectedIsAttachmentRequested: true,
+			expectedNetworkMapping: map[string]struct{}{
+				GetNADName(namespaceName, attachmentName):                      {},
+				GetIndexedNADKey(GetNADName(namespaceName, attachmentName), 1): {},
+			},
 		},
 		{
 			desc:           "Attaching to a secondary network to a user defined primary network is not supported",
@@ -813,7 +981,8 @@ func TestGetPodNADToNetworkMapping(t *testing.T) {
 			inputPodAnnotations: map[string]string{
 				nadv1.NetworkAttachmentAnnot: GetNADName(namespaceName, attachmentName),
 			},
-			expectedError: fmt.Errorf("unexpected primary network \"l3-network\" specified with a NetworkSelectionElement &{Name:attachment1 Namespace:ns1 IPRequest:[] MacRequest: InfinibandGUIDRequest: InterfaceRequest: PortMappingsRequest:[] BandwidthRequest:<nil> CNIArgs:<nil> GatewayRequest:[] IPAMClaimReference:}"),
+			expectedError:          fmt.Errorf("unexpected primary network \"l3-network\" specified with a NetworkSelectionElement &{Name:attachment1 Namespace:ns1 IPRequest:[] MacRequest: InfinibandGUIDRequest: InterfaceRequest: PortMappingsRequest:[] BandwidthRequest:<nil> CNIArgs:<nil> GatewayRequest:[] IPAMClaimReference:}"),
+			expectedNetworkMapping: map[string]struct{}{},
 		},
 	}
 
@@ -836,12 +1005,33 @@ func TestGetPodNADToNetworkMapping(t *testing.T) {
 				},
 			}
 
-			isAttachmentRequested, _, err := GetPodNADToNetworkMapping(pod, netInfo)
+			var resolver func(string) string
+			if netInfo.IsUserDefinedNetwork() {
+				expectedNADKey := test.inputNetConf.NADName
+				if expectedNADKey == "" {
+					t.Fatalf("missing NAD name for user-defined network %q", netInfo.GetNetworkName())
+				}
+				resolver = func(nadKey string) string {
+					if nadKey == expectedNADKey {
+						return netInfo.GetNetworkName()
+					}
+					return ""
+				}
+			}
 
-			if err != nil {
+			isAttachmentRequested, networkMap, err := getPodNADToNetworkMapping(pod, netInfo, resolver)
+			if test.expectedError != nil {
+				g.Expect(err).To(gomega.HaveOccurred())
 				g.Expect(err).To(gomega.MatchError(test.expectedError))
+			} else {
+				g.Expect(err).NotTo(gomega.HaveOccurred())
+			}
+			actualNetworkMapping := map[string]struct{}{}
+			for nadName := range networkMap {
+				actualNetworkMapping[nadName] = struct{}{}
 			}
 			g.Expect(isAttachmentRequested).To(gomega.Equal(test.expectedIsAttachmentRequested))
+			g.Expect(actualNetworkMapping).To(gomega.Equal(test.expectedNetworkMapping))
 		})
 	}
 }
@@ -862,6 +1052,8 @@ func TestGetPodNADToNetworkMappingWithActiveNetwork(t *testing.T) {
 		expectedError                    error
 		expectedIsAttachmentRequested    bool
 		expectedNetworkSelectionElements map[string]*nadv1.NetworkSelectionElement
+		enablePreconfiguredUDNAddresses  bool
+		injectPrimaryUDNNADs             []string
 	}
 
 	tests := []testConfig{
@@ -945,7 +1137,103 @@ func TestGetPodNADToNetworkMappingWithActiveNetwork(t *testing.T) {
 			},
 			inputPodAnnotations: map[string]string{
 				nadv1.NetworkAttachmentAnnot: GetNADName(namespaceName, "another-network"),
-				OvnUDNIPAMClaimName:          "the-one-to-the-left-of-the-pony",
+				DefNetworkAnnotation:         `[{"ipam-claim-reference":"the-one-to-the-left-of-the-pony","namespace":"ns1","name":"attachment1"}]`,
+			},
+			expectedIsAttachmentRequested: true,
+			expectedNetworkSelectionElements: map[string]*nadv1.NetworkSelectionElement{
+				"ns1/attachment1": {
+					Name:               "attachment1",
+					Namespace:          "ns1",
+					IPAMClaimReference: "the-one-to-the-left-of-the-pony",
+				},
+			},
+		},
+		{
+			desc: "the network configuration for a primary layer2 UDN features allow persistent IPs, and the pod requests it." +
+				"Using deprecated UDN IPAMClaim annotation",
+			// verify backward compatibility for deprecated annotation 'k8s.ovn.org/primary-udn-ipamclaim'
+			inputNetConf: &ovncnitypes.NetConf{
+				NetConf:            cnitypes.NetConf{Name: networkName},
+				Topology:           ovntypes.Layer2Topology,
+				NADName:            GetNADName(namespaceName, attachmentName),
+				Role:               ovntypes.NetworkRolePrimary,
+				AllowPersistentIPs: true,
+			},
+			inputPrimaryUDNConfig: &ovncnitypes.NetConf{
+				NetConf:            cnitypes.NetConf{Name: networkName},
+				Topology:           ovntypes.Layer2Topology,
+				NADName:            GetNADName(namespaceName, attachmentName),
+				Role:               ovntypes.NetworkRolePrimary,
+				AllowPersistentIPs: true,
+			},
+			inputPodAnnotations: map[string]string{
+				nadv1.NetworkAttachmentAnnot:  GetNADName(namespaceName, "another-network"),
+				DeprecatedOvnUDNIPAMClaimName: "the-one-to-the-left-of-the-pony",
+			},
+			expectedIsAttachmentRequested: true,
+			expectedNetworkSelectionElements: map[string]*nadv1.NetworkSelectionElement{
+				"ns1/attachment1": {
+					Name:               "attachment1",
+					Namespace:          "ns1",
+					IPAMClaimReference: "the-one-to-the-left-of-the-pony",
+				},
+			},
+		},
+		{
+			desc: "the network configuration for a primary layer2 UDN features allow persistent IPs, and the pod requests it." +
+				"Pod has both defaultNSE with ipam-claim reference and UDNIPAMClaim annotations, specifying the same IPAMClaim CR",
+			// verify backward compatibility for deprecated annotation 'k8s.ovn.org/primary-udn-ipamclaim'
+			inputNetConf: &ovncnitypes.NetConf{
+				NetConf:            cnitypes.NetConf{Name: networkName},
+				Topology:           ovntypes.Layer2Topology,
+				NADName:            GetNADName(namespaceName, attachmentName),
+				Role:               ovntypes.NetworkRolePrimary,
+				AllowPersistentIPs: true,
+			},
+			inputPrimaryUDNConfig: &ovncnitypes.NetConf{
+				NetConf:            cnitypes.NetConf{Name: networkName},
+				Topology:           ovntypes.Layer2Topology,
+				NADName:            GetNADName(namespaceName, attachmentName),
+				Role:               ovntypes.NetworkRolePrimary,
+				AllowPersistentIPs: true,
+			},
+			inputPodAnnotations: map[string]string{
+				nadv1.NetworkAttachmentAnnot:  GetNADName(namespaceName, "another-network"),
+				DefNetworkAnnotation:          `[{"ipam-claim-reference":"the-one-to-the-left-of-the-pony","namespace":"ns1","name":"attachment1"}]`,
+				DeprecatedOvnUDNIPAMClaimName: "the-one-to-the-left-of-the-pony",
+			},
+			expectedIsAttachmentRequested: true,
+			expectedNetworkSelectionElements: map[string]*nadv1.NetworkSelectionElement{
+				"ns1/attachment1": {
+					Name:               "attachment1",
+					Namespace:          "ns1",
+					IPAMClaimReference: "the-one-to-the-left-of-the-pony",
+				},
+			},
+		},
+		{
+			desc: "the network configuration for a primary layer2 UDN features allow persistent IPs, and the pod requests it." +
+				"Pod has both defaultNSE with ipam-claim reference and UDNIPAMClaim annotations, specifying different IPAMClaim CR." +
+				"DefaultNSE's ipam-claim reference should take precedence",
+			// verify backward compatibility for deprecated annotation 'k8s.ovn.org/primary-udn-ipamclaim'
+			inputNetConf: &ovncnitypes.NetConf{
+				NetConf:            cnitypes.NetConf{Name: networkName},
+				Topology:           ovntypes.Layer2Topology,
+				NADName:            GetNADName(namespaceName, attachmentName),
+				Role:               ovntypes.NetworkRolePrimary,
+				AllowPersistentIPs: true,
+			},
+			inputPrimaryUDNConfig: &ovncnitypes.NetConf{
+				NetConf:            cnitypes.NetConf{Name: networkName},
+				Topology:           ovntypes.Layer2Topology,
+				NADName:            GetNADName(namespaceName, attachmentName),
+				Role:               ovntypes.NetworkRolePrimary,
+				AllowPersistentIPs: true,
+			},
+			inputPodAnnotations: map[string]string{
+				nadv1.NetworkAttachmentAnnot:  GetNADName(namespaceName, "another-network"),
+				DefNetworkAnnotation:          `[{"ipam-claim-reference":"the-one-to-the-left-of-the-pony","namespace":"ns1","name":"attachment1"}]`,
+				DeprecatedOvnUDNIPAMClaimName: "the-one-to-the-right-of-the-horse",
 			},
 			expectedIsAttachmentRequested: true,
 			expectedNetworkSelectionElements: map[string]*nadv1.NetworkSelectionElement{
@@ -1000,8 +1288,8 @@ func TestGetPodNADToNetworkMappingWithActiveNetwork(t *testing.T) {
 				AllowPersistentIPs: true,
 			},
 			inputPodAnnotations: map[string]string{
-				nadv1.NetworkAttachmentAnnot: GetNADName(namespaceName, "another-network"),
-				OvnUDNIPAMClaimName:          "the-one-to-the-left-of-the-pony",
+				nadv1.NetworkAttachmentAnnot:  GetNADName(namespaceName, "another-network"),
+				DeprecatedOvnUDNIPAMClaimName: "the-one-to-the-left-of-the-pony",
 			},
 			expectedIsAttachmentRequested: true,
 			expectedNetworkSelectionElements: map[string]*nadv1.NetworkSelectionElement{
@@ -1011,10 +1299,192 @@ func TestGetPodNADToNetworkMappingWithActiveNetwork(t *testing.T) {
 				},
 			},
 		},
+		{
+			desc: "the network configuration for a primary layer2 UDN receive pod requesting IP, MAC and IPAMClaimRef on default network annotation for it",
+			inputNetConf: &ovncnitypes.NetConf{
+				NetConf:            cnitypes.NetConf{Name: networkName},
+				Topology:           ovntypes.Layer2Topology,
+				NADName:            GetNADName(namespaceName, attachmentName),
+				Role:               ovntypes.NetworkRolePrimary,
+				AllowPersistentIPs: true,
+			},
+			inputPrimaryUDNConfig: &ovncnitypes.NetConf{
+				NetConf:            cnitypes.NetConf{Name: networkName},
+				Topology:           ovntypes.Layer2Topology,
+				NADName:            GetNADName(namespaceName, attachmentName),
+				Role:               ovntypes.NetworkRolePrimary,
+				AllowPersistentIPs: true,
+			},
+			inputPodAnnotations: map[string]string{
+				nadv1.NetworkAttachmentAnnot: GetNADName(namespaceName, "another-network"),
+				DefNetworkAnnotation:         `[{"namespace": "ovn-kubernetes", "name": "default", "ips": ["192.168.0.3/24", "fda6::3/48"], "mac": "aa:bb:cc:dd:ee:ff", "ipam-claim-reference": "my-ipam-claim"}]`,
+			},
+			expectedIsAttachmentRequested: true,
+			expectedNetworkSelectionElements: map[string]*nadv1.NetworkSelectionElement{
+				"ns1/attachment1": {
+					Name:               "attachment1",
+					Namespace:          "ns1",
+					IPRequest:          []string{"192.168.0.3/24", "fda6::3/48"},
+					MacRequest:         "aa:bb:cc:dd:ee:ff",
+					IPAMClaimReference: "my-ipam-claim",
+				},
+			},
+			enablePreconfiguredUDNAddresses: true,
+		},
+		{
+			desc: "the network configuration for a primary layer2 UDN receive pod requesting IP and MAC on default network annotation for it, but with unexpected namespace",
+			inputNetConf: &ovncnitypes.NetConf{
+				NetConf:  cnitypes.NetConf{Name: networkName},
+				Topology: ovntypes.Layer2Topology,
+				NADName:  GetNADName(namespaceName, attachmentName),
+				Role:     ovntypes.NetworkRolePrimary,
+			},
+			inputPrimaryUDNConfig: &ovncnitypes.NetConf{
+				NetConf:  cnitypes.NetConf{Name: networkName},
+				Topology: ovntypes.Layer2Topology,
+				NADName:  GetNADName(namespaceName, attachmentName),
+				Role:     ovntypes.NetworkRolePrimary,
+			},
+			inputPodAnnotations: map[string]string{
+				DefNetworkAnnotation: `[{"namespace": "other-namespace", "name": "default", "ips": ["192.168.0.3/24", "fda6::3/48"], "mac": "aa:bb:cc:dd:ee:ff"}]`,
+			},
+			enablePreconfiguredUDNAddresses: true,
+			expectedError:                   fmt.Errorf(`unexpected default NSE namespace "other-namespace", expected "ovn-kubernetes"`),
+		},
+		{
+			desc: "the network configuration for a primary layer2 UDN receive pod requesting IP and MAC on default network annotation for it, but with unexpected name",
+			inputNetConf: &ovncnitypes.NetConf{
+				NetConf:  cnitypes.NetConf{Name: networkName},
+				Topology: ovntypes.Layer2Topology,
+				NADName:  GetNADName(namespaceName, attachmentName),
+				Role:     ovntypes.NetworkRolePrimary,
+			},
+			inputPrimaryUDNConfig: &ovncnitypes.NetConf{
+				NetConf:  cnitypes.NetConf{Name: networkName},
+				Topology: ovntypes.Layer2Topology,
+				NADName:  GetNADName(namespaceName, attachmentName),
+				Role:     ovntypes.NetworkRolePrimary,
+			},
+			inputPodAnnotations: map[string]string{
+				DefNetworkAnnotation: `[{"namespace": "ovn-kubernetes", "name": "unexpected-name", "ips": ["192.168.0.3/24", "fda6::3/48"], "mac": "aa:bb:cc:dd:ee:ff"}]`,
+			},
+			enablePreconfiguredUDNAddresses: true,
+			expectedError:                   fmt.Errorf(`unexpected default NSE name "unexpected-name", expected "default"`),
+		},
+		{
+			desc:           "should fail when no nad of the active network found on the pod namespace",
+			inputNamespace: "non-existent-ns",
+			expectedError:  fmt.Errorf(`failed to get primary NAD for namespace "non-existent-ns": no active NAD found for namespace "non-existent-ns"`),
+			inputNetConf: &ovncnitypes.NetConf{
+				NetConf:  cnitypes.NetConf{Name: networkName},
+				NADName:  GetNADName(namespaceName, attachmentName),
+				Topology: ovntypes.Layer2Topology,
+				Role:     ovntypes.NetworkRolePrimary,
+			},
+			inputPrimaryUDNConfig: &ovncnitypes.NetConf{
+				NetConf:  cnitypes.NetConf{Name: networkName},
+				Topology: ovntypes.Layer2Topology,
+				NADName:  GetNADName(namespaceName, attachmentName),
+				Role:     ovntypes.NetworkRolePrimary,
+			},
+		},
+		{
+			desc: "primary l2 CUDN (replicated NADs), should return the correct active network according to pod namespace",
+			inputNetConf: &ovncnitypes.NetConf{
+				NetConf:  cnitypes.NetConf{Name: "cluster_udn_l2p"},
+				NADName:  GetNADName("red", "l2p"),
+				Topology: ovntypes.Layer2Topology,
+				Role:     ovntypes.NetworkRolePrimary,
+			},
+			inputPrimaryUDNConfig: &ovncnitypes.NetConf{
+				NetConf:  cnitypes.NetConf{Name: "cluster_udn_l2p"},
+				NADName:  GetNADName("red", "l2p"),
+				Topology: ovntypes.Layer2Topology,
+				Role:     ovntypes.NetworkRolePrimary,
+			},
+			injectPrimaryUDNNADs: []string{"blue/l2p", "green/l2p"},
+			inputNamespace:       "blue",
+			inputPodAnnotations: map[string]string{
+				DefNetworkAnnotation: `[{"namespace": "ovn-kubernetes", "name": "default", "ips": ["192.168.0.3/24", "fda6::3/48"], "mac": "aa:bb:cc:dd:ee:ff"}]`,
+			},
+			enablePreconfiguredUDNAddresses: true,
+			expectedIsAttachmentRequested:   true,
+			expectedNetworkSelectionElements: map[string]*nadv1.NetworkSelectionElement{
+				"blue/l2p": {
+					Name:       "l2p",
+					Namespace:  "blue",
+					IPRequest:  []string{"192.168.0.3/24", "fda6::3/48"},
+					MacRequest: "aa:bb:cc:dd:ee:ff",
+				},
+			},
+		},
+
+		{
+			desc: "default-network ips and mac is is ignored for Layer3 topology",
+			inputNetConf: &ovncnitypes.NetConf{
+				NetConf:  cnitypes.NetConf{Name: networkName},
+				Topology: ovntypes.Layer3Topology,
+				NADName:  GetNADName(namespaceName, attachmentName),
+				Role:     ovntypes.NetworkRolePrimary,
+			},
+			inputPrimaryUDNConfig: &ovncnitypes.NetConf{
+				NetConf:  cnitypes.NetConf{Name: networkName},
+				Topology: ovntypes.Layer3Topology,
+				NADName:  GetNADName(namespaceName, attachmentName),
+				Role:     ovntypes.NetworkRolePrimary,
+			},
+			inputPodAnnotations: map[string]string{
+				nadv1.NetworkAttachmentAnnot: GetNADName(namespaceName, "another-network"),
+				DefNetworkAnnotation:         `[{"namespace": "ovn-kubernetes", "name": "default", "ips": ["192.168.0.3/24", "fda6::3/48"], "mac": "aa:bb:cc:dd:ee:ff"}]`,
+			},
+			expectedIsAttachmentRequested: true,
+			expectedNetworkSelectionElements: map[string]*nadv1.NetworkSelectionElement{
+				"ns1/attachment1": {
+					Name:       "attachment1",
+					Namespace:  "ns1",
+					IPRequest:  nil,
+					MacRequest: "",
+				},
+			},
+			enablePreconfiguredUDNAddresses: true,
+		},
+		{
+			desc: "default-network with bad format",
+			inputNetConf: &ovncnitypes.NetConf{
+				NetConf:  cnitypes.NetConf{Name: networkName},
+				Topology: ovntypes.Layer2Topology,
+				NADName:  GetNADName(namespaceName, attachmentName),
+				Role:     ovntypes.NetworkRolePrimary,
+			},
+			inputPrimaryUDNConfig: &ovncnitypes.NetConf{
+				NetConf:  cnitypes.NetConf{Name: networkName},
+				Topology: ovntypes.Layer2Topology,
+				NADName:  GetNADName(namespaceName, attachmentName),
+				Role:     ovntypes.NetworkRolePrimary,
+			},
+			inputPodAnnotations: map[string]string{
+				nadv1.NetworkAttachmentAnnot: GetNADName(namespaceName, "another-network"),
+				DefNetworkAnnotation:         `[{"foo}`,
+			},
+			enablePreconfiguredUDNAddresses: true,
+			expectedError:                   fmt.Errorf(`failed getting default-network annotation for pod "ns1/test-pod": %w`, fmt.Errorf(`GetK8sPodDefaultNetwork: failed to parse CRD object: parsePodNetworkAnnotation: failed to parse pod Network Attachment Selection Annotation JSON format: unexpected end of JSON input`)),
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.desc, func(t *testing.T) {
 			g := gomega.NewWithT(t)
+
+			t.Cleanup(func() {
+				_ = config.PrepareTestConfig()
+			})
+
+			// Set custom network config based on test requirements
+			config.OVNKubernetesFeature.EnablePreconfiguredUDNAddresses = test.enablePreconfiguredUDNAddresses
+			if test.enablePreconfiguredUDNAddresses {
+				config.OVNKubernetesFeature.EnableMultiNetwork = true
+				config.OVNKubernetesFeature.EnableNetworkSegmentation = true
+			}
+
 			netInfo, err := NewNetInfo(test.inputNetConf)
 			g.Expect(err).ToNot(gomega.HaveOccurred())
 			if test.inputNetConf.NADName != "" {
@@ -1030,6 +1500,9 @@ func TestGetPodNADToNetworkMappingWithActiveNetwork(t *testing.T) {
 				if test.inputPrimaryUDNConfig.NADName != "" {
 					mutableNetInfo := NewMutableNetInfo(primaryUDNNetInfo)
 					mutableNetInfo.AddNADs(test.inputPrimaryUDNConfig.NADName)
+					if len(test.injectPrimaryUDNNADs) > 0 {
+						mutableNetInfo.AddNADs(test.injectPrimaryUDNNADs...)
+					}
 					primaryUDNNetInfo = mutableNetInfo
 				}
 			}
@@ -1037,22 +1510,68 @@ func TestGetPodNADToNetworkMappingWithActiveNetwork(t *testing.T) {
 			pod := &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:        "test-pod",
-					Namespace:   test.inputNamespace,
+					Namespace:   namespaceName,
 					Annotations: test.inputPodAnnotations,
 				},
+			}
+			if test.inputNamespace != "" {
+				pod.Namespace = test.inputNamespace
+			}
+
+			expectedNADKey := test.inputNetConf.NADName
+			if expectedNADKey == "" {
+				t.Fatalf("missing NAD name for user-defined network %q", netInfo.GetNetworkName())
+			}
+			nadNetworkNames := map[string]string{
+				expectedNADKey: netInfo.GetNetworkName(),
+			}
+			primaryNADByNamespace := map[string]string{}
+			if primaryUDNNetInfo != nil {
+				primaryNADKeys := make([]string, 0, 1+len(test.injectPrimaryUDNNADs))
+				if test.inputPrimaryUDNConfig != nil && test.inputPrimaryUDNConfig.NADName != "" {
+					primaryNADKeys = append(primaryNADKeys, test.inputPrimaryUDNConfig.NADName)
+				}
+				primaryNADKeys = append(primaryNADKeys, test.injectPrimaryUDNNADs...)
+				for _, nadKey := range primaryNADKeys {
+					nadNamespace, _, err := cache.SplitMetaNamespaceKey(nadKey)
+					if err != nil {
+						t.Fatalf("failed to split NAD key %q: %v", nadKey, err)
+					}
+					primaryNADByNamespace[nadNamespace] = nadKey
+					nadNetworkNames[nadKey] = primaryUDNNetInfo.GetNetworkName()
+				}
+			}
+			resolver := func(nadKey string) string {
+				if networkName, ok := nadNetworkNames[nadKey]; ok {
+					return networkName
+				}
+				return ""
 			}
 
 			isAttachmentRequested, networkSelectionElements, err := GetPodNADToNetworkMappingWithActiveNetwork(
 				pod,
 				netInfo,
 				primaryUDNNetInfo,
+				resolver,
+				func(namespace string) (string, error) {
+					if primaryUDNNetInfo == nil {
+						return ovntypes.DefaultNetworkName, nil
+					}
+					if nadKey, ok := primaryNADByNamespace[namespace]; ok {
+						return nadKey, nil
+					}
+					return "", fmt.Errorf("no active NAD found for namespace %q", namespace)
+				},
 			)
 
-			if err != nil {
-				g.Expect(err).To(gomega.MatchError(test.expectedError))
+			if test.expectedError != nil {
+				g.Expect(err).To(gomega.HaveOccurred(), "unexpected success operation, epecting error")
+				g.Expect(err.Error()).To(gomega.Equal(test.expectedError.Error()))
+			} else {
+				g.Expect(err).ToNot(gomega.HaveOccurred())
+				g.Expect(isAttachmentRequested).To(gomega.Equal(test.expectedIsAttachmentRequested))
+				g.Expect(networkSelectionElements).To(gomega.Equal(test.expectedNetworkSelectionElements))
 			}
-			g.Expect(isAttachmentRequested).To(gomega.Equal(test.expectedIsAttachmentRequested))
-			g.Expect(networkSelectionElements).To(gomega.Equal(test.expectedNetworkSelectionElements))
 		})
 	}
 }
@@ -1068,6 +1587,8 @@ func TestSubnetOverlapCheck(t *testing.T) {
 	config.Gateway.V6MasqueradeSubnet = "fd69::/125"
 	config.Gateway.V4JoinSubnet = "100.64.0.0/16"
 	config.Gateway.V6JoinSubnet = "fd98::/64"
+	config.ClusterManager.V4TransitSubnet = "100.88.0.0/16"
+	config.ClusterManager.V6TransitSubnet = "fd97::/64"
 	type testConfig struct {
 		desc                        string
 		inputNetAttachDefConfigSpec string
@@ -1075,6 +1596,23 @@ func TestSubnetOverlapCheck(t *testing.T) {
 	}
 
 	tests := []testConfig{
+		{
+			desc: "return error when IPv4 POD subnet in net-attach-def overlaps with transit switch subnet",
+			inputNetAttachDefConfigSpec: `
+                {
+                    "name": "tenantred",
+                    "type": "ovn-k8s-cni-overlay",
+                    "topology": "layer3",
+                    "subnets": "100.88.0.0/17",
+                    "joinSubnet": "100.65.0.0/24",
+                    "primaryNetwork": true,
+                    "netAttachDefName": "ns1/nad1"
+                }
+			`,
+			expectedError: config.NewSubnetOverlapError(
+				config.ConfigSubnet{SubnetType: config.UserDefinedSubnets, Subnet: MustParseCIDR("100.88.0.0/17")},
+				config.ConfigSubnet{SubnetType: config.ConfigSubnetTransit, Subnet: MustParseCIDR(config.ClusterManager.V4TransitSubnet)}),
+		},
 		{
 			desc: "return error when IPv4 POD subnet in net-attach-def overlaps other subnets",
 			inputNetAttachDefConfigSpec: `
@@ -1088,8 +1626,9 @@ func TestSubnetOverlapCheck(t *testing.T) {
                     "netAttachDefName": "ns1/nad1"
                 }
 			`,
-			expectedError: fmt.Errorf("invalid subnet configuration: pod or join subnet overlaps with already configured internal subnets: " +
-				"illegal network configuration: user defined subnet \"10.129.0.0/16\" overlaps cluster subnet \"10.128.0.0/14\""),
+			expectedError: config.NewSubnetOverlapError(
+				config.ConfigSubnet{SubnetType: config.UserDefinedSubnets, Subnet: MustParseCIDR("10.129.0.0/16")},
+				config.ConfigSubnet{SubnetType: config.ConfigSubnetCluster, Subnet: cidr4}),
 		},
 		{
 			desc: "return error when IPv4 join subnet in net-attach-def overlaps other subnets",
@@ -1104,8 +1643,9 @@ func TestSubnetOverlapCheck(t *testing.T) {
                     "netAttachDefName": "ns1/nad1"
                 }
 			`,
-			expectedError: fmt.Errorf("invalid subnet configuration: pod or join subnet overlaps with already configured internal subnets: " +
-				"illegal network configuration: user defined join subnet \"100.64.0.0/24\" overlaps built-in join subnet \"100.64.0.0/16\""),
+			expectedError: config.NewSubnetOverlapError(
+				config.ConfigSubnet{SubnetType: config.UserDefinedJoinSubnet, Subnet: MustParseCIDR("100.64.0.0/24")},
+				config.ConfigSubnet{SubnetType: config.ConfigSubnetJoin, Subnet: MustParseCIDR(config.Gateway.V4JoinSubnet)}),
 		},
 		{
 			desc: "return error when IPv6 POD subnet in net-attach-def overlaps other subnets",
@@ -1120,8 +1660,10 @@ func TestSubnetOverlapCheck(t *testing.T) {
                     "netAttachDefName": "ns1/nad1"
                 }
 			`,
-			expectedError: fmt.Errorf("invalid subnet configuration: pod or join subnet overlaps with already configured internal subnets: " +
-				"illegal network configuration: user defined subnet \"fe01::/24\" overlaps service subnet \"fe01::/16\""),
+			expectedError: config.NewSubnetOverlapError(
+				config.ConfigSubnet{SubnetType: config.UserDefinedSubnets, Subnet: MustParseCIDR("fe01::/24")},
+				config.ConfigSubnet{SubnetType: config.ConfigSubnetService, Subnet: svcCidr6},
+			),
 		},
 		{
 			desc: "return error when IPv6 join subnet in net-attach-def overlaps other subnets",
@@ -1136,8 +1678,10 @@ func TestSubnetOverlapCheck(t *testing.T) {
                     "netAttachDefName": "ns1/nad1"
                 }
 			`,
-			expectedError: fmt.Errorf("invalid subnet configuration: pod or join subnet overlaps with already configured internal subnets: " +
-				"illegal network configuration: user defined join subnet \"fd69::/112\" overlaps masquerade subnet \"fd69::/125\""),
+			expectedError: config.NewSubnetOverlapError(
+				config.ConfigSubnet{SubnetType: config.UserDefinedJoinSubnet, Subnet: MustParseCIDR("fd69::/112")},
+				config.ConfigSubnet{SubnetType: config.ConfigSubnetMasquerade, Subnet: MustParseCIDR(config.Gateway.V6MasqueradeSubnet)},
+			),
 		},
 		{
 			desc: "excluded subnet should not be considered for overlap check",
@@ -1154,6 +1698,16 @@ func TestSubnetOverlapCheck(t *testing.T) {
                 }
 			`,
 		},
+		{
+			desc: "return error when the network is not ovnk",
+			inputNetAttachDefConfigSpec: `
+                {
+                    "name": "test",
+                    "type": "sriov-cni"
+                }
+			`,
+			expectedError: ErrorAttachDefNotOvnManaged,
+		},
 	}
 
 	for _, test := range tests {
@@ -1167,7 +1721,7 @@ func TestSubnetOverlapCheck(t *testing.T) {
 				})
 			if test.expectedError != nil {
 				_, err := ParseNADInfo(networkAttachmentDefinition)
-				g.Expect(err).To(gomega.MatchError(test.expectedError.Error()))
+				g.Expect(err).To(gomega.MatchError(gomega.ContainSubstring(test.expectedError.Error())))
 			} else {
 				_, err := ParseNADInfo(networkAttachmentDefinition)
 				g.Expect(err).NotTo(gomega.HaveOccurred())
@@ -1251,11 +1805,46 @@ func TestNewNetInfo(t *testing.T) {
 			config.IPv6Mode = test.ipv6Cluster
 			g := gomega.NewWithT(t)
 			_, err := NewNetInfo(inputNetConf)
-			if test.expectedError == nil {
-				g.Expect(err).ToNot(gomega.HaveOccurred())
+			if test.expectedError != nil {
+				g.Expect(err).To(gomega.MatchError(test.expectedError), "should return an error for invalid network configuration")
 			} else {
-				g.Expect(err).To(gomega.MatchError(test.expectedError.Error()))
+				g.Expect(err).NotTo(gomega.HaveOccurred(), "should not return an error for valid network configuration")
 			}
+		})
+	}
+}
+
+func TestAreNetworksCompatible(t *testing.T) {
+	tests := []struct {
+		desc                   string
+		aNetwork               NetInfo
+		anotherNetwork         NetInfo
+		expectedResult         bool
+		expectationDescription string
+	}{
+		{
+			desc:                   "physical network name update",
+			aNetwork:               &userDefinedNetInfo{physicalNetworkName: "A"},
+			anotherNetwork:         &userDefinedNetInfo{physicalNetworkName: "B"},
+			expectedResult:         false,
+			expectationDescription: "we should reconcile on physical network name updates",
+		},
+		{
+			desc:                   "networks with empty (default) transport should be compatible",
+			aNetwork:               &userDefinedNetInfo{transport: ""},
+			anotherNetwork:         &userDefinedNetInfo{transport: ""},
+			expectedResult:         true,
+			expectationDescription: "networks with no EVPN config should be compatible",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.desc, func(t *testing.T) {
+			g := gomega.NewWithT(t)
+			g.Expect(AreNetworksCompatible(test.aNetwork, test.anotherNetwork)).To(
+				gomega.Equal(test.expectedResult),
+				test.expectationDescription,
+			)
 		})
 	}
 }
@@ -1268,4 +1857,558 @@ func applyNADDefaults(nad *nadv1.NetworkAttachmentDefinition) *nadv1.NetworkAtta
 	nad.Name = name
 	nad.Namespace = namespace
 	return nad
+}
+
+func TestGetNodeManagementIP(t *testing.T) {
+	testCases := []struct {
+		name       string
+		netConf    *ovncnitypes.NetConf
+		hostSubnet string
+		expectedIP *net.IPNet
+	}{
+		{
+			name: "DefaultNetInfo should return traditional .2 address",
+			netConf: &ovncnitypes.NetConf{
+				NetConf: cnitypes.NetConf{Name: ovntypes.DefaultNetworkName},
+			},
+			hostSubnet: "10.0.0.0/24",
+			expectedIP: ovntest.MustParseIPNet("10.0.0.2/24"),
+		},
+		{
+			name: "Layer3 UDN should return traditional .2 address",
+			netConf: &ovncnitypes.NetConf{
+				NetConf:               cnitypes.NetConf{Name: "l3-network"},
+				Topology:              ovntypes.Layer3Topology,
+				Role:                  ovntypes.NetworkRolePrimary,
+				InfrastructureSubnets: "10.0.0.0/30",
+			},
+			hostSubnet: "10.0.0.0/24",
+			expectedIP: ovntest.MustParseIPNet("10.0.0.2/24"),
+		},
+		{
+			name: "Layer2 primary UDN without infrastructure subnets should return traditional .2 address",
+			netConf: &ovncnitypes.NetConf{
+				NetConf:  cnitypes.NetConf{Name: "l2-network"},
+				Topology: ovntypes.Layer2Topology,
+				Role:     ovntypes.NetworkRolePrimary,
+				Subnets:  "10.0.0.0/24",
+			},
+			hostSubnet: "10.0.0.0/24",
+			expectedIP: ovntest.MustParseIPNet("10.0.0.2/24"),
+		},
+		{
+			name: "Layer2 primary UDN with infrastructure subnets should allocate the second usable IP from infrastructure subnet",
+			netConf: &ovncnitypes.NetConf{
+				NetConf:               cnitypes.NetConf{Name: "l2-network"},
+				Topology:              ovntypes.Layer2Topology,
+				Role:                  ovntypes.NetworkRolePrimary,
+				Subnets:               "10.0.0.0/24",
+				InfrastructureSubnets: "10.0.0.4/30",
+			},
+			hostSubnet: "10.0.0.0/24",
+			expectedIP: ovntest.MustParseIPNet("10.0.0.5/24"),
+		},
+		{
+			name: "Layer2 primary UDN with infrastructure subnets should allocate from infrastructure subnet skipping the broadcast IP",
+			netConf: &ovncnitypes.NetConf{
+				NetConf:               cnitypes.NetConf{Name: "l2-network"},
+				Topology:              ovntypes.Layer2Topology,
+				Role:                  ovntypes.NetworkRolePrimary,
+				DefaultGatewayIPs:     "10.0.0.5",
+				Subnets:               "10.0.0.0/24",
+				InfrastructureSubnets: "10.0.0.255/32, 10.0.0.100/32",
+			},
+			hostSubnet: "10.0.0.0/24",
+			expectedIP: ovntest.MustParseIPNet("10.0.0.100/24"),
+		},
+		{
+			name: "Layer2 primary UDN with infrastructure subnets should allocate from infrastructure subnet without conflicting with default gateway",
+			netConf: &ovncnitypes.NetConf{
+				NetConf:               cnitypes.NetConf{Name: "l2-network"},
+				Topology:              ovntypes.Layer2Topology,
+				Role:                  ovntypes.NetworkRolePrimary,
+				DefaultGatewayIPs:     "10.0.0.2",
+				Subnets:               "10.0.0.0/24",
+				InfrastructureSubnets: "10.0.0.0/30",
+			},
+			hostSubnet: "10.0.0.0/24",
+			expectedIP: ovntest.MustParseIPNet("10.0.0.1/24"),
+		},
+		{
+			name: "Layer2 primary UDN with infrastructure subnets should allocate from infrastructure subnet without conflicting with the default GW ip",
+			netConf: &ovncnitypes.NetConf{
+				NetConf:               cnitypes.NetConf{Name: "l2-network"},
+				Topology:              ovntypes.Layer2Topology,
+				Role:                  ovntypes.NetworkRolePrimary,
+				DefaultGatewayIPs:     "10.0.0.2",
+				Subnets:               "10.0.0.0/24",
+				InfrastructureSubnets: "10.0.0.0/30",
+			},
+			hostSubnet: "10.0.0.0/24",
+			expectedIP: ovntest.MustParseIPNet("10.0.0.1/24"),
+		},
+		{
+			name: "Layer2 primary UDN with infrastructure subnets IPv6",
+			netConf: &ovncnitypes.NetConf{
+				NetConf:               cnitypes.NetConf{Name: "l2-network"},
+				Topology:              ovntypes.Layer2Topology,
+				Role:                  ovntypes.NetworkRolePrimary,
+				Subnets:               "2001:db8::/64",
+				InfrastructureSubnets: "2001:db8::/126",
+			},
+			hostSubnet: "2001:db8::/64",
+			expectedIP: ovntest.MustParseIPNet("2001:db8::2/64"),
+		},
+		{
+			name: "Layer2 primary UDN with infrastructure subnets IPv6 - last available IP",
+			netConf: &ovncnitypes.NetConf{
+				NetConf:               cnitypes.NetConf{Name: "l2-network"},
+				Topology:              ovntypes.Layer2Topology,
+				Role:                  ovntypes.NetworkRolePrimary,
+				DefaultGatewayIPs:     "2001:db8::ffff:ffff:ffff:fffe",
+				Subnets:               "2001:db8::/64",
+				InfrastructureSubnets: "2001:db8::ffff:ffff:ffff:fffe/127",
+			},
+			hostSubnet: "2001:db8::/64",
+			expectedIP: ovntest.MustParseIPNet("2001:db8::ffff:ffff:ffff:ffff/64"),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := gomega.NewWithT(t)
+			config.IPv4Mode = true
+			config.IPv6Mode = true
+			config.OVNKubernetesFeature.EnableMultiNetwork = true
+			config.OVNKubernetesFeature.EnableNetworkSegmentation = true
+			config.OVNKubernetesFeature.EnablePreconfiguredUDNAddresses = true
+
+			netInfo, err := NewNetInfo(tc.netConf)
+			g.Expect(err).ToNot(gomega.HaveOccurred())
+
+			hostSubnet := ovntest.MustParseIPNet(tc.hostSubnet)
+
+			result := netInfo.GetNodeManagementIP(hostSubnet)
+			if result == nil {
+				t.Fatalf("GetNodeManagementIP returned nil")
+			}
+
+			if !result.IP.Equal(tc.expectedIP.IP) {
+				t.Errorf("Expected IP %s, got %s", tc.expectedIP.IP.String(), result.IP.String())
+			}
+
+			if result.Mask.String() != tc.expectedIP.Mask.String() {
+				t.Errorf("Expected mask %s, got %s", tc.expectedIP.Mask.String(), result.Mask.String())
+			}
+		})
+	}
+}
+
+func TestEVPNConfig(t *testing.T) {
+	type testConfig struct {
+		desc                      string
+		inputNetConf              *ovncnitypes.NetConf
+		expectedTransport         string
+		expectedVTEPName          string
+		expectedMACVRFVNI         int32
+		expectedMACVRFRouteTarget string
+		expectedMACVRFVID         int
+		expectedIPVRFVNI          int32
+		expectedIPVRFRouteTarget  string
+		expectedIPVRFVID          int
+	}
+
+	tests := []testConfig{
+		{
+			desc: "default network has no EVPN config",
+			inputNetConf: &ovncnitypes.NetConf{
+				NetConf:  cnitypes.NetConf{Name: ovntypes.DefaultNetworkName},
+				Topology: ovntypes.Layer3Topology,
+			},
+			expectedTransport:         "",
+			expectedVTEPName:          "",
+			expectedMACVRFVNI:         0,
+			expectedMACVRFRouteTarget: "",
+			expectedIPVRFVNI:          0,
+			expectedIPVRFRouteTarget:  "",
+		},
+		{
+			desc: "layer3 network without EVPN config",
+			inputNetConf: &ovncnitypes.NetConf{
+				NetConf:  cnitypes.NetConf{Name: "l3-network"},
+				Topology: ovntypes.Layer3Topology,
+			},
+			expectedTransport:         "",
+			expectedVTEPName:          "",
+			expectedMACVRFVNI:         0,
+			expectedMACVRFRouteTarget: "",
+			expectedIPVRFVNI:          0,
+			expectedIPVRFRouteTarget:  "",
+		},
+		{
+			desc: "layer3 network with EVPN transport and IP-VRF only",
+			inputNetConf: &ovncnitypes.NetConf{
+				NetConf:   cnitypes.NetConf{Name: "evpn-l3-network"},
+				Topology:  ovntypes.Layer3Topology,
+				Transport: "evpn",
+				EVPN: &ovncnitypes.EVPNConfig{
+					VTEP: "my-vtep",
+					IPVRF: &ovncnitypes.VRFConfig{
+						VNI:         2000,
+						RouteTarget: "65000:2000",
+					},
+				},
+			},
+			expectedTransport:         "evpn",
+			expectedVTEPName:          "my-vtep",
+			expectedMACVRFVNI:         0,
+			expectedMACVRFRouteTarget: "",
+			expectedIPVRFVNI:          2000,
+			expectedIPVRFRouteTarget:  "65000:2000",
+		},
+		{
+			desc: "layer2 network with EVPN transport and MAC-VRF only",
+			inputNetConf: &ovncnitypes.NetConf{
+				NetConf:   cnitypes.NetConf{Name: "evpn-l2-network"},
+				Topology:  ovntypes.Layer2Topology,
+				Transport: "evpn",
+				EVPN: &ovncnitypes.EVPNConfig{
+					VTEP: "my-vtep",
+					MACVRF: &ovncnitypes.VRFConfig{
+						VNI:         100,
+						RouteTarget: "65000:100",
+					},
+				},
+			},
+			expectedTransport:         "evpn",
+			expectedVTEPName:          "my-vtep",
+			expectedMACVRFVNI:         100,
+			expectedMACVRFRouteTarget: "65000:100",
+			expectedIPVRFVNI:          0,
+			expectedIPVRFRouteTarget:  "",
+		},
+		{
+			desc: "layer2 network with EVPN transport and both MAC-VRF and IP-VRF (symmetric IRB)",
+			inputNetConf: &ovncnitypes.NetConf{
+				NetConf:   cnitypes.NetConf{Name: "evpn-l2-symmetric"},
+				Topology:  ovntypes.Layer2Topology,
+				Transport: "evpn",
+				EVPN: &ovncnitypes.EVPNConfig{
+					VTEP: "symmetric-vtep",
+					MACVRF: &ovncnitypes.VRFConfig{
+						VNI:         100,
+						RouteTarget: "65000:100",
+					},
+					IPVRF: &ovncnitypes.VRFConfig{
+						VNI:         1000,
+						RouteTarget: "65000:1000",
+					},
+				},
+			},
+			expectedTransport:         "evpn",
+			expectedVTEPName:          "symmetric-vtep",
+			expectedMACVRFVNI:         100,
+			expectedMACVRFRouteTarget: "65000:100",
+			expectedIPVRFVNI:          1000,
+			expectedIPVRFRouteTarget:  "65000:1000",
+		},
+		{
+			desc: "layer2 network with EVPN transport including VIDs (allocated by controller)",
+			inputNetConf: &ovncnitypes.NetConf{
+				NetConf:   cnitypes.NetConf{Name: "evpn-with-vids"},
+				Topology:  ovntypes.Layer2Topology,
+				Transport: "evpn",
+				EVPN: &ovncnitypes.EVPNConfig{
+					VTEP: "vid-vtep",
+					MACVRF: &ovncnitypes.VRFConfig{
+						VNI:         100,
+						RouteTarget: "65000:100",
+						VID:         12,
+					},
+					IPVRF: &ovncnitypes.VRFConfig{
+						VNI:         1000,
+						RouteTarget: "65000:1000",
+						VID:         13,
+					},
+				},
+			},
+			expectedTransport:         "evpn",
+			expectedVTEPName:          "vid-vtep",
+			expectedMACVRFVNI:         100,
+			expectedMACVRFRouteTarget: "65000:100",
+			expectedMACVRFVID:         12,
+			expectedIPVRFVNI:          1000,
+			expectedIPVRFRouteTarget:  "65000:1000",
+			expectedIPVRFVID:          13,
+		},
+		{
+			desc: "EVPN config with VNI only (no route target)",
+			inputNetConf: &ovncnitypes.NetConf{
+				NetConf:   cnitypes.NetConf{Name: "evpn-minimal"},
+				Topology:  ovntypes.Layer2Topology,
+				Transport: "evpn",
+				EVPN: &ovncnitypes.EVPNConfig{
+					VTEP: "minimal-vtep",
+					MACVRF: &ovncnitypes.VRFConfig{
+						VNI: 500,
+					},
+				},
+			},
+			expectedTransport:         "evpn",
+			expectedVTEPName:          "minimal-vtep",
+			expectedMACVRFVNI:         500,
+			expectedMACVRFRouteTarget: "",
+			expectedIPVRFVNI:          0,
+			expectedIPVRFRouteTarget:  "",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.desc, func(t *testing.T) {
+			g := gomega.NewWithT(t)
+			netInfo, err := NewNetInfo(test.inputNetConf)
+			g.Expect(err).ToNot(gomega.HaveOccurred())
+
+			g.Expect(netInfo.Transport()).To(gomega.Equal(test.expectedTransport), "Transport mismatch")
+			g.Expect(netInfo.EVPNVTEPName()).To(gomega.Equal(test.expectedVTEPName), "VTEP name mismatch")
+			g.Expect(netInfo.EVPNMACVRFVNI()).To(gomega.Equal(test.expectedMACVRFVNI), "MAC-VRF VNI mismatch")
+			g.Expect(netInfo.EVPNMACVRFRouteTarget()).To(gomega.Equal(test.expectedMACVRFRouteTarget), "MAC-VRF RouteTarget mismatch")
+			g.Expect(netInfo.EVPNMACVRFVID()).To(gomega.Equal(test.expectedMACVRFVID), "MAC-VRF VID mismatch")
+			g.Expect(netInfo.EVPNIPVRFVNI()).To(gomega.Equal(test.expectedIPVRFVNI), "IP-VRF VNI mismatch")
+			g.Expect(netInfo.EVPNIPVRFRouteTarget()).To(gomega.Equal(test.expectedIPVRFRouteTarget), "IP-VRF RouteTarget mismatch")
+			g.Expect(netInfo.EVPNIPVRFVID()).To(gomega.Equal(test.expectedIPVRFVID), "IP-VRF VID mismatch")
+		})
+	}
+}
+
+func TestEVPNNetworkCompatibility(t *testing.T) {
+	tests := []struct {
+		desc                   string
+		aNetwork               NetInfo
+		anotherNetwork         NetInfo
+		expectedResult         bool
+		expectationDescription string
+	}{
+		{
+			desc:                   "same EVPN config should be compatible",
+			aNetwork:               &userDefinedNetInfo{transport: "evpn", evpn: &ovncnitypes.EVPNConfig{VTEP: "vtep1"}},
+			anotherNetwork:         &userDefinedNetInfo{transport: "evpn", evpn: &ovncnitypes.EVPNConfig{VTEP: "vtep1"}},
+			expectedResult:         true,
+			expectationDescription: "networks with same EVPN config should be compatible",
+		},
+		{
+			desc:                   "different transport should not be compatible",
+			aNetwork:               &userDefinedNetInfo{transport: "evpn"},
+			anotherNetwork:         &userDefinedNetInfo{transport: "no-overlay"},
+			expectedResult:         false,
+			expectationDescription: "networks with different transport should not be compatible",
+		},
+		{
+			desc:                   "different VTEP name should not be compatible",
+			aNetwork:               &userDefinedNetInfo{transport: "evpn", evpn: &ovncnitypes.EVPNConfig{VTEP: "vtep1"}},
+			anotherNetwork:         &userDefinedNetInfo{transport: "evpn", evpn: &ovncnitypes.EVPNConfig{VTEP: "vtep2"}},
+			expectedResult:         false,
+			expectationDescription: "networks with different VTEP name should not be compatible",
+		},
+		{
+			desc: "different MAC-VRF VNI should not be compatible",
+			aNetwork: &userDefinedNetInfo{
+				transport: "evpn",
+				evpn: &ovncnitypes.EVPNConfig{
+					VTEP:   "vtep1",
+					MACVRF: &ovncnitypes.VRFConfig{VNI: 100},
+				},
+			},
+			anotherNetwork: &userDefinedNetInfo{
+				transport: "evpn",
+				evpn: &ovncnitypes.EVPNConfig{
+					VTEP:   "vtep1",
+					MACVRF: &ovncnitypes.VRFConfig{VNI: 200},
+				},
+			},
+			expectedResult:         false,
+			expectationDescription: "networks with different MAC-VRF VNI should not be compatible",
+		},
+		{
+			desc: "different IP-VRF route target should not be compatible",
+			aNetwork: &userDefinedNetInfo{
+				transport: "evpn",
+				evpn: &ovncnitypes.EVPNConfig{
+					VTEP:  "vtep1",
+					IPVRF: &ovncnitypes.VRFConfig{VNI: 1000, RouteTarget: "65000:1000"},
+				},
+			},
+			anotherNetwork: &userDefinedNetInfo{
+				transport: "evpn",
+				evpn: &ovncnitypes.EVPNConfig{
+					VTEP:  "vtep1",
+					IPVRF: &ovncnitypes.VRFConfig{VNI: 1000, RouteTarget: "65001:1000"},
+				},
+			},
+			expectedResult:         false,
+			expectationDescription: "networks with different IP-VRF route target should not be compatible",
+		},
+		{
+			desc:                   "both nil EVPN config should be compatible",
+			aNetwork:               &userDefinedNetInfo{transport: ""},
+			anotherNetwork:         &userDefinedNetInfo{transport: ""},
+			expectedResult:         true,
+			expectationDescription: "networks with no EVPN config should be compatible",
+		},
+		{
+			desc:                   "one nil EVPN config should not be compatible",
+			aNetwork:               &userDefinedNetInfo{transport: "evpn", evpn: &ovncnitypes.EVPNConfig{VTEP: "vtep1"}},
+			anotherNetwork:         &userDefinedNetInfo{transport: "evpn"},
+			expectedResult:         false,
+			expectationDescription: "network with EVPN config vs without should not be compatible",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.desc, func(t *testing.T) {
+			g := gomega.NewWithT(t)
+			g.Expect(AreNetworksCompatible(test.aNetwork, test.anotherNetwork)).To(
+				gomega.Equal(test.expectedResult),
+				test.expectationDescription,
+			)
+		})
+	}
+}
+
+func TestGetNodeGatewayIP(t *testing.T) {
+	testCases := []struct {
+		name       string
+		netConf    *ovncnitypes.NetConf
+		hostSubnet string
+		expectedIP *net.IPNet
+	}{
+		{
+			name: "DefaultNetInfo should return traditional .1 address",
+			netConf: &ovncnitypes.NetConf{
+				NetConf: cnitypes.NetConf{Name: ovntypes.DefaultNetworkName},
+			},
+			hostSubnet: "10.0.0.0/24",
+			expectedIP: ovntest.MustParseIPNet("10.0.0.1/24"),
+		},
+		{
+			name: "Layer3 UDN should return traditional .1 address",
+			netConf: &ovncnitypes.NetConf{
+				NetConf:               cnitypes.NetConf{Name: "l3-network"},
+				Topology:              ovntypes.Layer3Topology,
+				Role:                  ovntypes.NetworkRolePrimary,
+				InfrastructureSubnets: "10.0.0.0/30",
+			},
+			hostSubnet: "10.0.0.0/24",
+			expectedIP: ovntest.MustParseIPNet("10.0.0.1/24"),
+		},
+		{
+			name: "Layer2 primary UDN without infrastructure subnets should return traditional .1 address",
+			netConf: &ovncnitypes.NetConf{
+				NetConf:  cnitypes.NetConf{Name: "l2-network"},
+				Topology: ovntypes.Layer2Topology,
+				Role:     ovntypes.NetworkRolePrimary,
+				Subnets:  "10.0.0.0/24",
+			},
+			hostSubnet: "10.0.0.0/24",
+			expectedIP: ovntest.MustParseIPNet("10.0.0.1/24"),
+		},
+		{
+			name: "Layer2 primary UDN with custom default gateway IP should return that custom IP",
+			netConf: &ovncnitypes.NetConf{
+				NetConf:           cnitypes.NetConf{Name: "l2-network"},
+				Topology:          ovntypes.Layer2Topology,
+				Role:              ovntypes.NetworkRolePrimary,
+				DefaultGatewayIPs: "10.0.0.5",
+				Subnets:           "10.0.0.0/24",
+			},
+			hostSubnet: "10.0.0.0/24",
+			expectedIP: ovntest.MustParseIPNet("10.0.0.5/24"),
+		},
+		{
+			name: "Layer2 primary UDN with infrastructure subnets should allocate the first usable IP from infrastructure subnet",
+			netConf: &ovncnitypes.NetConf{
+				NetConf:               cnitypes.NetConf{Name: "l2-network"},
+				Topology:              ovntypes.Layer2Topology,
+				Role:                  ovntypes.NetworkRolePrimary,
+				Subnets:               "10.0.0.0/24",
+				InfrastructureSubnets: "10.0.0.4/30",
+			},
+			hostSubnet: "10.0.0.0/24",
+			expectedIP: ovntest.MustParseIPNet("10.0.0.4/24"),
+		},
+		{
+			name: "Layer2 primary UDN with infrastructure subnets should allocate from infrastructure subnet skipping the network IP",
+			netConf: &ovncnitypes.NetConf{
+				NetConf:               cnitypes.NetConf{Name: "l2-network"},
+				Topology:              ovntypes.Layer2Topology,
+				Role:                  ovntypes.NetworkRolePrimary,
+				Subnets:               "10.0.0.0/24",
+				InfrastructureSubnets: "10.0.0.0/30",
+			},
+			hostSubnet: "10.0.0.0/24",
+			expectedIP: ovntest.MustParseIPNet("10.0.0.1/24"),
+		},
+		{
+			name: "Layer2 primary UDN with infrastructure subnets should allocate from infrastructure subnet skipping the broadcast IP",
+			netConf: &ovncnitypes.NetConf{
+				NetConf:               cnitypes.NetConf{Name: "l2-network"},
+				Topology:              ovntypes.Layer2Topology,
+				Role:                  ovntypes.NetworkRolePrimary,
+				Subnets:               "10.0.0.0/24",
+				InfrastructureSubnets: "10.0.0.255/32, 10.0.0.9/32",
+			},
+			hostSubnet: "10.0.0.0/24",
+			expectedIP: ovntest.MustParseIPNet("10.0.0.9/24"),
+		},
+		{
+			name: "Layer2 primary UDN with infrastructure subnets IPv6",
+			netConf: &ovncnitypes.NetConf{
+				NetConf:  cnitypes.NetConf{Name: "l2-network"},
+				Topology: ovntypes.Layer2Topology,
+				Role:     ovntypes.NetworkRolePrimary,
+
+				Subnets:               "2001:db8::/64",
+				InfrastructureSubnets: "2001:db8::/126",
+			},
+			hostSubnet: "2001:db8::/64",
+			expectedIP: ovntest.MustParseIPNet("2001:db8::1/64"),
+		},
+		{
+			name: "Localnet topology should return traditional .1 address",
+			netConf: &ovncnitypes.NetConf{
+				NetConf:  cnitypes.NetConf{Name: "localnet-network"},
+				Topology: ovntypes.LocalnetTopology,
+			},
+			hostSubnet: "10.0.0.0/24",
+			expectedIP: ovntest.MustParseIPNet("10.0.0.1/24"),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := gomega.NewWithT(t)
+			netInfo, err := NewNetInfo(tc.netConf)
+			g.Expect(err).ToNot(gomega.HaveOccurred())
+			config.IPv4Mode = true
+			config.IPv6Mode = true
+			config.OVNKubernetesFeature.EnableMultiNetwork = true
+			config.OVNKubernetesFeature.EnableNetworkSegmentation = true
+			config.OVNKubernetesFeature.EnablePreconfiguredUDNAddresses = true
+
+			hostSubnet := ovntest.MustParseIPNet(tc.hostSubnet)
+
+			result := netInfo.GetNodeGatewayIP(hostSubnet)
+			if result == nil {
+				t.Fatalf("GetNodeGatewayIP returned nil")
+			}
+
+			if !result.IP.Equal(tc.expectedIP.IP) {
+				t.Errorf("Expected IP %s, got %s", tc.expectedIP.IP.String(), result.IP.String())
+			}
+
+			if result.Mask.String() != tc.expectedIP.Mask.String() {
+				t.Errorf("Expected mask %s, got %s", tc.expectedIP.Mask.String(), result.Mask.String())
+			}
+		})
+	}
 }

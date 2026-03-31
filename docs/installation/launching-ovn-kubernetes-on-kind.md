@@ -6,27 +6,27 @@ KIND (Kubernetes in Docker) deployment of OVN kubernetes is a fast and easy mean
 
 - 20 GB of free space in root file system
 - Docker run time or podman
-- [KIND]( https://kubernetes.io/docs/setup/learning-environment/kind/ )
+- [KIND](https://kubernetes.io/docs/setup/learning-environment/kind/)
    - Installation instructions can be found at https://github.com/kubernetes-sigs/kind#installation-and-usage. 
-   - NOTE: The OVN-Kubernetes [ovn-kubernetes/contrib/kind.sh](https://github.com/ovn-org/ovn-kubernetes/blob/master/contrib/kind.sh) and [ovn-kubernetes/contrib/kind.yaml](https://github.com/ovn-org/ovn-kubernetes/blob/master/contrib/kind.yaml) files provision port 11337. If firewalld is enabled, this port will need to be unblocked:
+   - NOTE: The OVN-Kubernetes [ovn-kubernetes/contrib/kind.sh](https://github.com/ovn-kubernetes/ovn-kubernetes/blob/master/contrib/kind.sh) and [ovn-kubernetes/contrib/kind.yaml](https://github.com/ovn-kubernetes/ovn-kubernetes/blob/master/contrib/kind.yaml) files provision port 11337. If firewalld is enabled, this port will need to be unblocked:
 
       ```
       sudo firewall-cmd --permanent --add-port=11337/tcp; sudo firewall-cmd --reload
       ```
-- [kubectl]( https://kubernetes.io/docs/tasks/tools/install-kubectl/ )
-- Python and pip
+- [kubectl](https://kubernetes.io/docs/tasks/tools/install-kubectl/)
+- Python 3 and [pipx](https://pipx.pypa.io/stable/installation/)
 - jq
 - openssl
 - openvswitch
-
-**NOTE :**  In certain operating systems such as CentOS 8.x, pip2 and pip3 binaries are installed instead of pip. In such situations create a softlink for "pip" that points to "pip2".
+- Go 1.23.0 or above
+- For podman users: skopeo
 
 For OVN kubernetes KIND deployment, use the `kind.sh` script.
 
 First Download and build the OVN-Kubernetes repo: 
 
-```
-git clone github.com/ovn-org/ovn-kubernetes; 
+```shell
+git clone https://github.com/ovn-kubernetes/ovn-kubernetes.git 
 cd ovn-kubernetes
 ```
 The `kind.sh` script builds OVN-Kubernetes into a container image. To verify
@@ -44,7 +44,7 @@ Build the image for fedora and launch the KIND Deployment
 
 ```
 $ pushd dist/images
-$ make fedora
+$ make fedora-image
 $ popd
 
 $ pushd contrib
@@ -70,7 +70,7 @@ $ OCI_BIN=podman
 Then build,
 
 ```
-$ make fedora
+$ make fedora-image
 $ popd
 ```
 
@@ -79,13 +79,16 @@ To deploy KIND however, you need to start it as root and then copy root's kube c
 ```
 $ pushd contrib
 $ sudo ./kind.sh -ep podman
+$ mkdir -p ~/.kube
 $ sudo cp /root/ovn.conf ~/.kube/kind-config
 $ sudo chown $(id -u):$(id -g) ~/.kube/kind-config
 $ export KUBECONFIG=~/.kube/kind-config
 $ popd
 ```
 
-This will launch a KIND deployment. By default the cluster is named `ovn`.
+**NOTE:** If you installed go via the official path on Linux and have encountered the "go: command not found" issue, you can preserve your environment when doing sudo: `sudo --preserve-env=PATH ./kind.sh -ep podman`
+
+This will launch a KIND deployment. By default, the cluster is named `ovn`.
 
 ```
 $ kubectl get nodes
@@ -129,6 +132,7 @@ usage: kind.sh [[[-cf |--config-file <file>] [-kt|keep-taint] [-ha|--ha-enabled]
                  [-cl |--ovn-loglevel-controller <loglevel>] [-me|--multicast-enabled]
                  [-ep |--experimental-provider <name>] |
                  [-eb |--egress-gw-separate-bridge]
+                 [-nqe|--network-qos-enable]
                  [-h]]
 
 -cf  | --config-file                Name of the KIND J2 configuration file.
@@ -170,9 +174,10 @@ usage: kind.sh [[[-cf |--config-file <file>] [-kt|keep-taint] [-ha|--ha-enabled]
 -cl  | --ovn-loglevel-controller    Log config for ovn-controller DEFAULT: '-vconsole:info'.
 -ep  | --experimental-provider      Use an experimental OCI provider such as podman, instead of docker. DEFAULT: Disabled.
 -eb  | --egress-gw-separate-bridge  The external gateway traffic uses a separate bridge.
+-nqe | --network-qos-enable         Enable network QoS. DEFAULT: Disabled.
 -lr  |--local-kind-registry         Will start and connect a kind local registry to push/retrieve images
 --delete                      	    Delete current cluster
---deploy                      	    Deploy ovn kubernetes without restarting kind
+--deploy                      	    Deploy ovn-kubernetes without restarting kind
 ```
 
 As seen above, if you do not specify any options the script will assume the default values.
@@ -313,16 +318,16 @@ and blamed on firewalld.
 To run OVN-Kubernetes with IPv6 in a KIND deployment, run:
 
 ```
-$ go get github.com/ovn-org/ovn-kubernetes; cd $GOPATH/src/github.com/ovn-org/ovn-kubernetes
+$ go get github.com/ovn-kubernetes/ovn-kubernetes; cd $GOPATH/src/github.com/ovn-kubernetes/ovn-kubernetes
 
 $ cd go-controller/
 $ make
 
 $ cd ../dist/images/
-$ make fedora
+$ make fedora-image
 
 $ cd ../../contrib/
-$ KIND_IPV4_SUPPORT=false KIND_IPV6_SUPPORT=true ./kind.sh
+$ PLATFORM_IPV4_SUPPORT=false PLATFORM_IPV6_SUPPORT=true ./kind.sh
 ```
 
 Once `kind.sh` completes, setup kube config file:
@@ -370,14 +375,14 @@ sudo ln -s /usr/bin/kubectl-v1.17.3 /usr/bin/kubectl
 Download and install latest version of `kubectl`:
 
 ```
-$ K8S_VERSION=v1.31.0
+$ K8S_VERSION=v1.35.0
 $ curl -LO https://storage.googleapis.com/kubernetes-release/release/$K8S_VERSION/bin/linux/amd64/kubectl
 $ chmod +x kubectl
 $ sudo mv kubectl /usr/bin/kubectl-$K8S_VERSION
 $ sudo rm /usr/bin/kubectl
 $ sudo ln -s /usr/bin/kubectl-$K8S_VERSION /usr/bin/kubectl
 $ kubectl version --client
-Client Version: v1.31.0
+Client Version: v1.32.3
 Kustomize Version: v5.0.4-0.20230601165947-6ce0bf390ce3
 ```
 
@@ -412,21 +417,21 @@ make install INSTALL_DIR=$GOPATH/bin
 ### OVN-Kubernetes With IP Dual-stack
 
 For status of IP dual-stack in OVN-Kubernetes, see
-[1142](https://github.com/ovn-org/ovn-kubernetes/issues/1142).
+[1142](https://github.com/ovn-kubernetes/ovn-kubernetes/issues/1142).
 
 To run OVN-Kubernetes with IP dual-stack in a KIND deployment, run:
 
 ```
-$ go get github.com/ovn-org/ovn-kubernetes; cd $GOPATH/src/github.com/ovn-org/ovn-kubernetes
+$ go get github.com/ovn-kubernetes/ovn-kubernetes; cd $GOPATH/src/github.com/ovn-kubernetes/ovn-kubernetes
 
 $ cd go-controller/
 $ make
 
 $ cd ../dist/images/
-$ make fedora
+$ make fedora-image
 
 $ cd ../../contrib/
-$ KIND_IPV4_SUPPORT=true KIND_IPV6_SUPPORT=true K8S_VERSION=v1.31.0 ./kind.sh
+$ PLATFORM_IPV4_SUPPORT=true PLATFORM_IPV6_SUPPORT=true K8S_VERSION=v1.35.0 ./kind.sh
 ```
 
 Once `kind.sh` completes, setup kube config file:
@@ -452,7 +457,7 @@ one (or both of) the following variables:
 
 ```
 $ cd ../../contrib/
-$ KIND_IMAGE=example.com/kindest/node K8S_VERSION=v1.31.0 ./kind.sh
+$ KIND_IMAGE=example.com/kindest/node K8S_VERSION=v1.35.0 ./kind.sh
 ```
 
 ### Using kind local registry to deploy non ovn-k containers

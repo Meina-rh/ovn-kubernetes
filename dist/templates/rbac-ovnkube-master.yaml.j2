@@ -85,6 +85,8 @@ rules:
           - adminpolicybasedexternalroutes
           - userdefinednetworks
           - clusteruserdefinednetworks
+          - networkqoses
+          - vteps
       verbs: [ "get", "list", "watch" ]
     - apiGroups: ["k8s.cni.cncf.io"]
       resources:
@@ -119,6 +121,8 @@ rules:
           - clusteruserdefinednetworks
           - clusteruserdefinednetworks/status
           - clusteruserdefinednetworks/finalizers
+          - networkqoses
+          - networkqoses/status
       verbs: [ "patch", "update" ]
     - apiGroups: [""]
       resources:
@@ -145,7 +149,7 @@ rules:
     {%- endif %}
 
 
-# https://github.com/ovn-org/ovn-kubernetes/blob/e1e7d40f9a6c6038b52696c1b8f8915a4d73160e/go-controller/pkg/ovn/topology_version.go#L28
+# https://github.com/ovn-kubernetes/ovn-kubernetes/blob/e1e7d40f9a6c6038b52696c1b8f8915a4d73160e/go-controller/pkg/ovn/topology_version.go#L28
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -188,3 +192,83 @@ spec:
         apiVersions: ["v1"]
         operations:  ["UPDATE"]
         resources:   ["namespaces"]
+
+{% if ovn_pre_conf_udn_addr_enable == "true" -%}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: default-network-annotation
+spec:
+  matchConstraints:
+    resourceRules:
+      - apiGroups:   [""]
+        apiVersions: ["v1"]
+        operations:  ["UPDATE"]
+        resources:   ["pods"]
+  failurePolicy: Fail
+  validations:
+    # Prevent any changes to the default-network annotation after pod creation:
+    # - If annotation exists in old pod: new pod must have same annotation with identical value
+    # - If annotation doesn't exist in old pod: new pod must also not have it
+    - expression: >
+        ('v1.multus-cni.io/default-network' in oldObject.metadata.annotations)
+        ? ('v1.multus-cni.io/default-network' in object.metadata.annotations) && oldObject.metadata.annotations['v1.multus-cni.io/default-network'] == object.metadata.annotations['v1.multus-cni.io/default-network']
+        : !('v1.multus-cni.io/default-network' in object.metadata.annotations)
+      message: "The 'v1.multus-cni.io/default-network' annotation cannot be changed after the pod was created"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: default-network-annotation-binding
+spec:
+  policyName: default-network-annotation
+  validationActions: [Deny]
+  matchResources:
+    resourceRules:
+      - apiGroups:   [""]
+        apiVersions: ["v1"]
+        operations:  ["UPDATE"]
+        resources:   ["pods"]
+{%- endif %}
+
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: egressip-mark-annotation-validation
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: ["k8s.ovn.org"]
+      apiVersions: ["v1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["egressips"]
+  validations:
+  # Prevent creating EgressIP with the annotation
+  - expression: 'request.operation != "CREATE" || !has(object.metadata.annotations) || !("k8s.ovn.org/egressip-mark" in object.metadata.annotations)'
+    message: 'EgressIP resources cannot be created with the "k8s.ovn.org/egressip-mark" annotation. This annotation is managed by the system.'
+    reason: Invalid
+  # Prevent modifying or removing the annotation once set
+  - expression: 'request.operation != "UPDATE" || !has(oldObject.metadata.annotations) || !("k8s.ovn.org/egressip-mark" in oldObject.metadata.annotations) ||
+      (has(object.metadata.annotations) && ("k8s.ovn.org/egressip-mark" in object.metadata.annotations) && oldObject.metadata.annotations["k8s.ovn.org/egressip-mark"] == object.metadata.annotations["k8s.ovn.org/egressip-mark"])'
+    message: 'The "k8s.ovn.org/egressip-mark" annotation cannot be modified or removed once set. This annotation is managed by the system.'
+    reason: Invalid
+  # Only OVN controller service account can add the annotation
+  {% if ovn_enable_interconnect == "true" -%}
+  - expression: 'request.operation != "UPDATE" || !has(object.metadata.annotations) || !("k8s.ovn.org/egressip-mark" in object.metadata.annotations) || (has(oldObject.metadata.annotations) && ("k8s.ovn.org/egressip-mark" in oldObject.metadata.annotations)) || request.userInfo.username == "system:serviceaccount:ovn-kubernetes:ovnkube-cluster-manager"'
+  {% else %}
+  - expression: 'request.operation != "UPDATE" || !has(object.metadata.annotations) || !("k8s.ovn.org/egressip-mark" in object.metadata.annotations) || (has(oldObject.metadata.annotations) && ("k8s.ovn.org/egressip-mark" in oldObject.metadata.annotations)) || request.userInfo.username == "system:serviceaccount:ovn-kubernetes:ovnkube-master"'
+  {%- endif %}
+    message: 'A regular user must not add "k8s.ovn.org/egressip-mark" annotation to an EgressIP custom resource.'
+    reason: Invalid
+
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: egressip-mark-annotation-validation-binding
+spec:
+  policyName: egressip-mark-annotation-validation
+  validationActions: [Deny]

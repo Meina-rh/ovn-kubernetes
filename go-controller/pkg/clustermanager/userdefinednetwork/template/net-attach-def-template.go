@@ -12,10 +12,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	ovncnitypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/cni/types"
-	userdefinednetworkv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	ovncnitypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/cni/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	userdefinednetworkv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 const (
@@ -23,23 +24,24 @@ const (
 
 	FinalizerUserDefinedNetwork = "k8s.ovn.org/user-defined-network-protection"
 	LabelUserDefinedNetwork     = "k8s.ovn.org/user-defined-network"
-
-	cniVersion = "1.0.0"
 )
 
 type SpecGetter interface {
 	GetTopology() userdefinednetworkv1.NetworkTopology
 	GetLayer3() *userdefinednetworkv1.Layer3Config
 	GetLayer2() *userdefinednetworkv1.Layer2Config
+	GetLocalnet() *userdefinednetworkv1.LocalnetConfig
+	GetTransport() userdefinednetworkv1.TransportOption
+	GetEVPN() *userdefinednetworkv1.EVPNConfig
 }
 
-func RenderNetAttachDefManifest(obj client.Object, targetNamespace string) (*netv1.NetworkAttachmentDefinition, error) {
+func RenderNetAttachDefManifest(obj client.Object, targetNamespace string, opts ...RenderOption) (*netv1.NetworkAttachmentDefinition, error) {
 	if obj == nil {
 		return nil, nil
 	}
 
 	if targetNamespace == "" {
-		return nil, fmt.Errorf("namspace should not be empty")
+		return nil, fmt.Errorf("namespace should not be empty")
 	}
 
 	var ownerRef metav1.OwnerReference
@@ -60,7 +62,7 @@ func RenderNetAttachDefManifest(obj client.Object, targetNamespace string) (*net
 
 	nadName := util.GetNADName(targetNamespace, obj.GetName())
 
-	nadSpec, err := RenderNADSpec(networkName, nadName, spec)
+	nadSpec, err := renderNADSpec(networkName, nadName, spec, applyOptions(opts))
 	if err != nil {
 		return nil, err
 	}
@@ -70,18 +72,19 @@ func RenderNetAttachDefManifest(obj client.Object, targetNamespace string) (*net
 			Name:            obj.GetName(),
 			OwnerReferences: []metav1.OwnerReference{ownerRef},
 			Labels:          renderNADLabels(obj),
+			Annotations:     renderNADAnnotations(obj),
 			Finalizers:      []string{FinalizerUserDefinedNetwork},
 		},
 		Spec: *nadSpec,
 	}, nil
 }
 
-func RenderNADSpec(networkName, nadName string, spec SpecGetter) (*netv1.NetworkAttachmentDefinitionSpec, error) {
+func renderNADSpec(networkName, nadName string, spec SpecGetter, opts *RenderOptions) (*netv1.NetworkAttachmentDefinitionSpec, error) {
 	if err := validateTopology(spec); err != nil {
 		return nil, fmt.Errorf("invalid topology specified: %w", err)
 	}
 
-	cniNetConf, err := renderCNINetworkConfig(networkName, nadName, spec)
+	cniNetConf, err := renderCNINetworkConfig(networkName, nadName, spec, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to render CNI network config: %w", err)
 	}
@@ -95,7 +98,7 @@ func RenderNADSpec(networkName, nadName string, spec SpecGetter) (*netv1.Network
 	}, nil
 }
 
-// renderNADLabels copies labels from UDN to help RenderNADSpec
+// renderNADLabels copies labels from UDN to help renderNADSpec
 // function add those labels to corresponding NAD
 func renderNADLabels(obj client.Object) map[string]string {
 	labels := make(map[string]string)
@@ -107,23 +110,40 @@ func renderNADLabels(obj client.Object) map[string]string {
 	return labels
 }
 
+// renderNADAnnotations copies annotations from UDN to corresponding NAD
+func renderNADAnnotations(obj client.Object) map[string]string {
+	udnAnnotations := obj.GetAnnotations()
+	annotations := make(map[string]string)
+	for k, v := range udnAnnotations {
+		if !strings.HasPrefix(k, types.OvnK8sPrefix) {
+			annotations[k] = v
+		}
+	}
+	if len(annotations) == 0 {
+		return nil
+	}
+	return annotations
+}
+
 func validateTopology(spec SpecGetter) error {
 	if spec.GetTopology() == userdefinednetworkv1.NetworkTopologyLayer3 && spec.GetLayer3() == nil ||
-		spec.GetTopology() == userdefinednetworkv1.NetworkTopologyLayer2 && spec.GetLayer2() == nil {
-		return fmt.Errorf("topology %[1]s is specified but %[1]s config is nil", spec.GetTopology())
+		spec.GetTopology() == userdefinednetworkv1.NetworkTopologyLayer2 && spec.GetLayer2() == nil ||
+		spec.GetTopology() == userdefinednetworkv1.NetworkTopologyLocalnet && spec.GetLocalnet() == nil {
+		return config.NewTopologyConfigMismatchError(string(spec.GetTopology()))
 	}
 	return nil
 }
 
-func renderCNINetworkConfig(networkName, nadName string, spec SpecGetter) (map[string]interface{}, error) {
+func renderCNINetworkConfig(networkName, nadName string, spec SpecGetter, opts *RenderOptions) (map[string]interface{}, error) {
 	netConfSpec := &ovncnitypes.NetConf{
 		NetConf: cnitypes.NetConf{
-			CNIVersion: cniVersion,
+			CNIVersion: config.CNISpecVersion,
 			Type:       OvnK8sCNIOverlay,
 			Name:       networkName,
 		},
-		NADName:  nadName,
-		Topology: strings.ToLower(string(spec.GetTopology())),
+		NADName:   nadName,
+		Topology:  strings.ToLower(string(spec.GetTopology())),
+		Transport: transportFromCRD(spec.GetTransport()),
 	}
 
 	switch spec.GetTopology() {
@@ -138,22 +158,59 @@ func renderCNINetworkConfig(networkName, nadName string, spec SpecGetter) (map[s
 		if err := validateIPAM(cfg.IPAM); err != nil {
 			return nil, err
 		}
+		if ipamEnabled(cfg.IPAM) && len(cfg.Subnets) == 0 {
+			return nil, config.NewSubnetsRequiredError()
+		}
+		if !ipamEnabled(cfg.IPAM) && len(cfg.Subnets) > 0 {
+			return nil, config.NewSubnetsMustBeUnsetError()
+		}
+
 		netConfSpec.Role = strings.ToLower(string(cfg.Role))
 		netConfSpec.MTU = int(cfg.MTU)
 		netConfSpec.AllowPersistentIPs = cfg.IPAM != nil && cfg.IPAM.Lifecycle == userdefinednetworkv1.IPAMLifecyclePersistent
-		if ipamEnabled(cfg.IPAM) && len(cfg.Subnets) == 0 {
-			return nil, fmt.Errorf("subnets is required with ipam.mode is Enabled or unset")
-		}
-		if !ipamEnabled(cfg.IPAM) && len(cfg.Subnets) > 0 {
-			return nil, fmt.Errorf("subnets must be unset when ipam.mode is Disabled")
-		}
 		netConfSpec.Subnets = cidrString(cfg.Subnets)
+		if util.IsPreconfiguredUDNAddressesEnabled() {
+			netConfSpec.ReservedSubnets = cidrString(cfg.ReservedSubnets)
+			netConfSpec.InfrastructureSubnets = cidrString(cfg.InfrastructureSubnets)
+			netConfSpec.DefaultGatewayIPs = ipString(cfg.DefaultGatewayIPs)
+		}
 		netConfSpec.JoinSubnet = cidrString(renderJoinSubnets(cfg.Role, cfg.JoinSubnets))
+		// now generate transit subnet for layer2 topology
+		if cfg.Role == userdefinednetworkv1.NetworkRolePrimary {
+			err := util.SetTransitSubnets(netConfSpec)
+			if err != nil {
+				return nil, err
+			}
+		}
+	case userdefinednetworkv1.NetworkTopologyLocalnet:
+		cfg := spec.GetLocalnet()
+		netConfSpec.Role = strings.ToLower(string(cfg.Role))
+		netConfSpec.MTU = localnetMTU(cfg.MTU)
+		netConfSpec.AllowPersistentIPs = cfg.IPAM != nil && cfg.IPAM.Lifecycle == userdefinednetworkv1.IPAMLifecyclePersistent
+		netConfSpec.Subnets = cidrString(cfg.Subnets)
+		netConfSpec.ExcludeSubnets = cidrString(cfg.ExcludeSubnets)
+		netConfSpec.PhysicalNetworkName = cfg.PhysicalNetworkName
+
+		if cfg.VLAN != nil && cfg.VLAN.Access != nil {
+			netConfSpec.VLANID = int(cfg.VLAN.Access.ID)
+		}
+	}
+
+	if spec.GetTransport() == userdefinednetworkv1.TransportOptionEVPN {
+		if !util.IsEVPNEnabled() {
+			return nil, fmt.Errorf("EVPN transport requested but EVPN feature is not enabled")
+		}
+		netConfSpec.EVPN = renderEVPNConfig(spec, opts)
+	}
+
+	if netConfSpec.AllowPersistentIPs && !config.OVNKubernetesFeature.EnablePersistentIPs {
+		return nil, fmt.Errorf("allowPersistentIPs is set but persistentIPs is Disabled")
 	}
 
 	if err := util.ValidateNetConf(nadName, netConfSpec); err != nil {
 		return nil, err
 	}
+
 	if _, err := util.NewNetInfo(netConfSpec); err != nil {
 		return nil, err
 	}
@@ -165,7 +222,7 @@ func renderCNINetworkConfig(networkName, nadName string, spec SpecGetter) (map[s
 	// Generating the net-conf JSON string using 'map[string]struct{}' provide the
 	// expected result.
 	cniNetConf := map[string]interface{}{
-		"cniVersion":       cniVersion,
+		"cniVersion":       config.CNISpecVersion,
 		"type":             OvnK8sCNIOverlay,
 		"name":             networkName,
 		"netAttachDefName": nadName,
@@ -176,7 +233,10 @@ func renderCNINetworkConfig(networkName, nadName string, spec SpecGetter) (map[s
 		cniNetConf["mtu"] = mtu
 	}
 	if len(netConfSpec.JoinSubnet) > 0 {
-		cniNetConf["joinSubnets"] = netConfSpec.JoinSubnet
+		cniNetConf["joinSubnet"] = netConfSpec.JoinSubnet
+	}
+	if len(netConfSpec.TransitSubnet) > 0 {
+		cniNetConf["transitSubnet"] = netConfSpec.TransitSubnet
 	}
 	if len(netConfSpec.Subnets) > 0 {
 		cniNetConf["subnets"] = netConfSpec.Subnets
@@ -184,8 +244,61 @@ func renderCNINetworkConfig(networkName, nadName string, spec SpecGetter) (map[s
 	if netConfSpec.AllowPersistentIPs {
 		cniNetConf["allowPersistentIPs"] = netConfSpec.AllowPersistentIPs
 	}
+	if netConfSpec.PhysicalNetworkName != "" {
+		cniNetConf["physicalNetworkName"] = netConfSpec.PhysicalNetworkName
+	}
+	if len(netConfSpec.ExcludeSubnets) > 0 {
+		cniNetConf["excludeSubnets"] = netConfSpec.ExcludeSubnets
+	}
+
+	if netConfSpec.VLANID != 0 {
+		cniNetConf["vlanID"] = netConfSpec.VLANID
+	}
+	if util.IsPreconfiguredUDNAddressesEnabled() {
+		if len(netConfSpec.ReservedSubnets) > 0 {
+			cniNetConf["reservedSubnets"] = netConfSpec.ReservedSubnets
+		}
+		if len(netConfSpec.InfrastructureSubnets) > 0 {
+			cniNetConf["infrastructureSubnets"] = netConfSpec.InfrastructureSubnets
+		}
+		if len(netConfSpec.DefaultGatewayIPs) > 0 {
+			cniNetConf["defaultGatewayIPs"] = netConfSpec.DefaultGatewayIPs
+		}
+	}
+
+	if netConfSpec.Transport != "" {
+		cniNetConf["transport"] = netConfSpec.Transport
+	}
+	if netConfSpec.EVPN != nil {
+		cniNetConf["evpn"] = netConfSpec.EVPN
+	}
 
 	return cniNetConf, nil
+}
+
+// transportFromCRD converts CRD PascalCase format to canonical format.
+// CRD format uses PascalCase: "NoOverlay", "EVPN"; empty string means default OVN transport.
+// Returns canonical lowercase format: "no-overlay", "evpn", or "" for default.
+func transportFromCRD(crdTransport userdefinednetworkv1.TransportOption) string {
+	switch crdTransport {
+	case userdefinednetworkv1.TransportOptionNoOverlay:
+		return types.NetworkTransportNoOverlay
+	case userdefinednetworkv1.TransportOptionEVPN:
+		return types.NetworkTransportEVPN
+	default:
+		return "" // empty string means default OVN transport; kubebuilder prevents unknown values
+	}
+}
+
+func localnetMTU(desiredMTU int32) int {
+	// The MTU for localnet topology should be as the default MTU (1500) because the underlay
+	// is not part of the SDN and compensating for the SDN overhead (100) is not required.
+	mtu := config.Default.MTU + 100
+	if desiredMTU > 0 {
+		mtu = int(desiredMTU)
+	}
+
+	return mtu
 }
 
 func ipamEnabled(ipam *userdefinednetworkv1.IPAMConfig) bool {
@@ -197,7 +310,7 @@ func validateIPAM(ipam *userdefinednetworkv1.IPAMConfig) error {
 		return nil
 	}
 	if ipam.Lifecycle == userdefinednetworkv1.IPAMLifecyclePersistent && !ipamEnabled(ipam) {
-		return fmt.Errorf("lifecycle Persistent is only supported when ipam.mode is Enabled")
+		return config.NewIPAMLifecycleNotSupportedError()
 	}
 	return nil
 }
@@ -240,6 +353,44 @@ func cidrString[T cidr](subnets T) string {
 		cidrs = append(cidrs, string(subnet))
 	}
 	return strings.Join(cidrs, ",")
+}
+
+func ipString(ips userdefinednetworkv1.DualStackIPs) string {
+	var ipStrings []string
+	for _, ip := range ips {
+		ipStrings = append(ipStrings, string(ip))
+	}
+	return strings.Join(ipStrings, ",")
+}
+
+// renderEVPNConfig converts the EVPN configuration from the spec into the CNI EVPNConfig format.
+// Note: evpnCfg is guaranteed to be non-nil by CEL validation on the CRD.
+func renderEVPNConfig(spec SpecGetter, opts *RenderOptions) *ovncnitypes.EVPNConfig {
+	evpnCfg := spec.GetEVPN()
+	evpnConfig := &ovncnitypes.EVPNConfig{
+		VTEP: evpnCfg.VTEP,
+	}
+
+	if evpnCfg.MACVRF != nil {
+		evpnConfig.MACVRF = &ovncnitypes.VRFConfig{
+			VNI:         evpnCfg.MACVRF.VNI,
+			RouteTarget: string(evpnCfg.MACVRF.RouteTarget),
+		}
+		if opts != nil && opts.EVPNVIDs != nil && opts.EVPNVIDs.MACVRFVID > 0 {
+			evpnConfig.MACVRF.VID = opts.EVPNVIDs.MACVRFVID
+		}
+	}
+	if evpnCfg.IPVRF != nil {
+		evpnConfig.IPVRF = &ovncnitypes.VRFConfig{
+			VNI:         evpnCfg.IPVRF.VNI,
+			RouteTarget: string(evpnCfg.IPVRF.RouteTarget),
+		}
+		if opts != nil && opts.EVPNVIDs != nil && opts.EVPNVIDs.IPVRFVID > 0 {
+			evpnConfig.IPVRF.VID = opts.EVPNVIDs.IPVRFVID
+		}
+	}
+
+	return evpnConfig
 }
 
 func GetSpec(obj client.Object) SpecGetter {

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	ipgenerator "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/generator/ip"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	ipgenerator "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/generator/ip"
 )
 
 const (
@@ -83,6 +83,26 @@ func GetUDNGatewayMasqueradeIPs(networkID int) ([]*net.IPNet, error) {
 			return nil, fmt.Errorf("failed to get v6 masquerade IP, networkID %d: %v", networkID, err)
 		}
 		masqIPs = append(masqIPs, v6MasqIPs.GatewayRouter)
+	}
+	return masqIPs, nil
+}
+
+// GetUDNMgmtPortMasqueradeIPs returns the list of management port masqueradeIPs for the given UDN's networkID
+func GetUDNMgmtPortMasqueradeIPs(networkID int) ([]*net.IPNet, error) {
+	var masqIPs []*net.IPNet
+	if config.IPv4Mode {
+		v4MasqIPs, err := AllocateV4MasqueradeIPs(networkID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get v4 masquerade IP, networkID %d: %v", networkID, err)
+		}
+		masqIPs = append(masqIPs, v4MasqIPs.ManagementPort)
+	}
+	if config.IPv6Mode {
+		v6MasqIPs, err := AllocateV6MasqueradeIPs(networkID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get v6 masquerade IP, networkID %d: %v", networkID, err)
+		}
+		masqIPs = append(masqIPs, v6MasqIPs.ManagementPort)
 	}
 	return masqIPs, nil
 }

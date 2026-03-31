@@ -11,32 +11,48 @@ import (
 	"k8s.io/klog/v2"
 	utilnet "k8s.io/utils/net"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/managementport"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
-func initLocalGateway(hostSubnets []*net.IPNet, cfg *managementPortConfig) error {
-	klog.Info("Adding iptables masquerading rules for new local gateway")
-	if util.IsNetworkSegmentationSupportEnabled() {
-		if err := ensureChain("nat", iptableUDNMasqueradeChain); err != nil {
-			return fmt.Errorf("failed to ensure chain %s in NAT table: %w", iptableUDNMasqueradeChain, err)
-		}
+func initLocalGateway(hostSubnets []*net.IPNet, mgmtPort managementport.Interface) error {
+	if config.OvnKubeNode.Mode == types.NodeModeDPU {
+		return nil
 	}
+
+	klog.Info("Adding iptables masquerading rules for new local gateway")
+
+	var allCIDRs []*net.IPNet
+	ifName := mgmtPort.GetInterfaceName()
+
+	// First pass: collect all CIDRs and setup iptables filter rules per interface
 	for _, hostSubnet := range hostSubnets {
 		// local gateway mode uses mp0 as default path for all ingress traffic into OVN
-		var nextHop *net.IPNet
-		if utilnet.IsIPv6CIDR(hostSubnet) {
-			nextHop = cfg.ipv6.ifAddr
-		} else {
-			nextHop = cfg.ipv4.ifAddr
+		nextHop, err := util.MatchFirstIPNetFamily(utilnet.IsIPv6CIDR(hostSubnet), mgmtPort.GetAddresses())
+		if err != nil {
+			return fmt.Errorf("failed to find management port address: %w", err)
 		}
 
 		// add iptables masquerading for mp0 to exit the host for egress
 		cidr := nextHop.IP.Mask(nextHop.Mask)
 		cidrNet := &net.IPNet{IP: cidr, Mask: nextHop.Mask}
-		if err := initLocalGatewayNATRules(cfg.ifName, cidrNet); err != nil {
-			return fmt.Errorf("failed to add local NAT rules for: %s, err: %v", cfg.ifName, err)
+		allCIDRs = append(allCIDRs, cidrNet)
+
+		// Setup iptables filter rules for this interface/CIDR
+		if err := initLocalGatewayIPTFilterRules(ifName, cidrNet); err != nil {
+			return fmt.Errorf("failed to add local NAT rules for: %s, err: %v", ifName, err)
 		}
 	}
+
+	// setup nftables masquerade rules for all CIDRs (v4, v6 or dualstack)
+	if len(allCIDRs) > 0 {
+		if err := initLocalGatewayNFTNATRules(allCIDRs...); err != nil {
+			return fmt.Errorf("failed to setup nftables masquerade rules: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -70,6 +86,9 @@ func getLocalAddrs() (map[string]net.IPNet, error) {
 }
 
 func cleanupLocalnetGateway(physnet string) error {
+	if config.OvnKubeNode.Mode == types.NodeModeDPUHost {
+		return nil
+	}
 	stdout, stderr, err := util.RunOVSVsctl("--if-exists", "get", "Open_vSwitch", ".",
 		"external_ids:ovn-bridge-mappings")
 	if err != nil {

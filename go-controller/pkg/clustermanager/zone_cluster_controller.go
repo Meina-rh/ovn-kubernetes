@@ -11,13 +11,13 @@ import (
 	cache "k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/id"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	ipgenerator "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/generator/ip"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
-	objretry "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/retry"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/id"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	ipgenerator "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/generator/ip"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/kube"
+	objretry "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/retry"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 const (
@@ -66,16 +66,16 @@ func newZoneClusterController(ovnClient *util.OVNClusterManagerClientset, wf *fa
 	var err error
 	if config.OVNKubernetesFeature.EnableInterconnect {
 		if config.IPv4Mode {
-			transitSwitchIPv4Generator, err = ipgenerator.NewIPGenerator(config.ClusterManager.V4TransitSwitchSubnet)
+			transitSwitchIPv4Generator, err = ipgenerator.NewIPGenerator(config.ClusterManager.V4TransitSubnet)
 			if err != nil {
-				return nil, fmt.Errorf("error creating IP Generator for v4 transit switch subnet %s: %w", config.ClusterManager.V4TransitSwitchSubnet, err)
+				return nil, fmt.Errorf("error creating IP Generator for v4 transit subnet %s: %w", config.ClusterManager.V4TransitSubnet, err)
 			}
 		}
 
 		if config.IPv6Mode {
-			transitSwitchIPv6Generator, err = ipgenerator.NewIPGenerator(config.ClusterManager.V6TransitSwitchSubnet)
+			transitSwitchIPv6Generator, err = ipgenerator.NewIPGenerator(config.ClusterManager.V6TransitSubnet)
 			if err != nil {
-				return nil, fmt.Errorf("error creating IP Generator for v6 transit switch subnet %s: %w", config.ClusterManager.V4TransitSwitchSubnet, err)
+				return nil, fmt.Errorf("error creating IP Generator for v6 transit subnet %s: %w", config.ClusterManager.V6TransitSubnet, err)
 			}
 		}
 	}
@@ -107,7 +107,7 @@ func (zcc *zoneClusterController) initRetryFramework() {
 		},
 	}
 
-	zcc.retryNodes = objretry.NewRetryFramework(zcc.stopChan, zcc.wg, zcc.watchFactory, resourceHandler)
+	zcc.retryNodes = objretry.NewRetryFramework("zoneClusterController", zcc.stopChan, zcc.wg, zcc.watchFactory, resourceHandler)
 }
 
 // Start starts the zone cluster controller to watch the kubernetes nodes
@@ -129,6 +129,23 @@ func (zcc *zoneClusterController) Stop() {
 	if zcc.nodeHandler != nil {
 		zcc.watchFactory.RemoveNodeHandler(zcc.nodeHandler)
 	}
+}
+
+func needsZoneAllocation(node *corev1.Node) bool {
+	if config.HybridOverlay.Enabled && util.NoHostSubnet(node) {
+		// skip hybrid overlay nodes
+		return false
+	}
+
+	if _, ok := node.Annotations[util.OvnNodeID]; !ok {
+		return true
+	}
+	if config.OVNKubernetesFeature.EnableInterconnect {
+		if _, ok := node.Annotations[util.OvnTransitSwitchPortAddr]; !ok {
+			return true
+		}
+	}
+	return false
 }
 
 // handleAddUpdateNodeEvent handles the add or update node event
@@ -195,7 +212,7 @@ func (zcc *zoneClusterController) syncNodeIDs(nodes []interface{}) error {
 			return fmt.Errorf("spurious object in syncNodes: %v", nodeObj)
 		}
 
-		nodeID := util.GetNodeID(node)
+		nodeID, _ := util.GetNodeID(node)
 		if nodeID != util.InvalidNodeID {
 			klog.Infof("Node %s has the id %d set", node.Name, nodeID)
 			if err := zcc.nodeIDAllocator.ReserveID(node.Name, nodeID); err != nil {
@@ -226,6 +243,8 @@ type zoneClusterControllerEventHandler struct {
 	objType  reflect.Type
 	zcc      *zoneClusterController
 	syncFunc func([]interface{}) error
+
+	nodeSyncFailed sync.Map
 }
 
 func (h *zoneClusterControllerEventHandler) FilterOutResource(_ interface{}) bool {
@@ -246,9 +265,11 @@ func (h *zoneClusterControllerEventHandler) AddResource(obj interface{}, _ bool)
 			return fmt.Errorf("could not cast %T object to *corev1.Node", obj)
 		}
 		if err = h.zcc.handleAddUpdateNodeEvent(node); err != nil {
+			h.nodeSyncFailed.Store(node.Name, true)
 			return fmt.Errorf("node add failed for %s, will try again later: %w",
 				node.Name, err)
 		}
+		h.nodeSyncFailed.Delete(node.Name)
 	default:
 		return fmt.Errorf("no add function for object type %s", h.objType)
 	}
@@ -267,10 +288,16 @@ func (h *zoneClusterControllerEventHandler) UpdateResource(_, newObj interface{}
 		if !ok {
 			return fmt.Errorf("could not cast %T object to *corev1.Node", newObj)
 		}
+		_, nodeFailed := h.nodeSyncFailed.Load(node.GetName())
+		if !nodeFailed && !needsZoneAllocation(node) {
+			// node ID and transit switch IP are assigned by us and cannot change
+			return nil
+		}
 		if err = h.zcc.handleAddUpdateNodeEvent(node); err != nil {
 			return fmt.Errorf("node update failed for %s, will try again later: %w",
 				node.Name, err)
 		}
+		h.nodeSyncFailed.Delete(node.GetName())
 	default:
 		return fmt.Errorf("no update function for object type %s", h.objType)
 	}
@@ -286,7 +313,11 @@ func (h *zoneClusterControllerEventHandler) DeleteResource(obj, _ interface{}) e
 		if !ok {
 			return fmt.Errorf("could not cast obj of type %T to *knet.Node", obj)
 		}
-		return h.zcc.handleDeleteNode(node)
+		err := h.zcc.handleDeleteNode(node)
+		if err != nil {
+			return err
+		}
+		h.nodeSyncFailed.Delete(node.GetName())
 	}
 	return nil
 }
@@ -326,9 +357,6 @@ func (h *zoneClusterControllerEventHandler) AreResourcesEqual(obj1, obj2 interfa
 
 		// Check if the annotations have changed.
 		if util.NodeIDAnnotationChanged(node1, node2) {
-			return false, nil
-		}
-		if util.NodeGatewayRouterLRPAddrsAnnotationChanged(node1, node2) {
 			return false, nil
 		}
 		if util.NodeTransitSwitchPortAddrAnnotationChanged(node1, node2) {

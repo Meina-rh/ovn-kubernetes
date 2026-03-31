@@ -1,8 +1,6 @@
 package ovn
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -16,18 +14,20 @@ import (
 	listers "k8s.io/client-go/listers/core/v1"
 	ref "k8s.io/client-go/tools/reference"
 	"k8s.io/klog/v2"
+	v1pod "k8s.io/kubernetes/pkg/api/v1/pod"
 
-	libovsdbclient "github.com/ovn-org/libovsdb/client"
+	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kubevirt"
-	libovsdbutil "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/util"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/metrics"
-	addressset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/address_set"
-	anpcontroller "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/admin_network_policy"
-	egresssvc_zone "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/egressservice"
-	ovntypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/kubevirt"
+	libovsdbutil "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/metrics"
+	addressset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/address_set"
+	anpcontroller "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/controller/admin_network_policy"
+	egresssvc_zone "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/controller/egressservice"
+	networkconnectcontroller "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/controller/networkconnect"
+	ovntypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 const egressFirewallDNSDefaultDuration = 30 * time.Minute
@@ -117,6 +117,10 @@ func networkStatusAnnotationsChanged(oldPod, newPod *corev1.Pod) bool {
 	return oldPod.Annotations[nettypes.NetworkStatusAnnot] != newPod.Annotations[nettypes.NetworkStatusAnnot]
 }
 
+func podBecameReady(oldPod, newPod *corev1.Pod) bool {
+	return !v1pod.IsPodReadyConditionTrue(oldPod.Status) && v1pod.IsPodReadyConditionTrue(newPod.Status)
+}
+
 // ensurePod tries to set up a pod. It returns nil on success and error on failure; failure
 // indicates the pod set up should be retried later.
 func (oc *DefaultNetworkController) ensurePod(oldPod, pod *corev1.Pod, addPort bool) error {
@@ -129,6 +133,14 @@ func (oc *DefaultNetworkController) ensurePod(oldPod, pod *corev1.Pod, addPort b
 	switchName := pod.Spec.NodeName
 	if oc.lsManager.IsNonHostSubnetSwitch(switchName) {
 		return oc.ensureRemotePodIP(oldPod, pod, addPort)
+	}
+
+	// If an external gateway pod is in terminating or not ready state then remove the
+	// routes for the external gateway pod
+	if util.PodTerminating(pod) || !v1pod.IsPodReadyConditionTrue(pod.Status) {
+		if err := oc.deletePodExternalGW(pod); err != nil {
+			return fmt.Errorf("ensurePod failed %s/%s: %w", pod.Namespace, pod.Name, err)
+		}
 	}
 
 	if oc.isPodScheduledinLocalZone(pod) {
@@ -170,7 +182,7 @@ func (oc *DefaultNetworkController) ensureLocalZonePod(oldPod, pod *corev1.Pod, 
 		}
 	} else {
 		// either pod is host-networked or its an update for a normal pod (addPort=false case)
-		if oldPod == nil || exGatewayAnnotationsChanged(oldPod, pod) || networkStatusAnnotationsChanged(oldPod, pod) {
+		if oldPod == nil || exGatewayAnnotationsChanged(oldPod, pod) || networkStatusAnnotationsChanged(oldPod, pod) || podBecameReady(oldPod, pod) {
 			if err := oc.addPodExternalGW(pod); err != nil {
 				return fmt.Errorf("addPodExternalGW failed for %s/%s: %w", pod.Namespace, pod.Name, err)
 			}
@@ -205,7 +217,7 @@ func (oc *DefaultNetworkController) ensureLocalZonePod(oldPod, pod *corev1.Pod, 
 
 func (oc *DefaultNetworkController) ensureRemotePodIP(oldPod, pod *corev1.Pod, addPort bool) error {
 	if (addPort || (oldPod != nil && len(pod.Status.PodIPs) != len(oldPod.Status.PodIPs))) && !util.PodWantsHostNetwork(pod) {
-		podIfAddrs, err := util.GetPodCIDRsWithFullMask(pod, oc.GetNetInfo())
+		podIfAddrs, err := util.GetPodCIDRsWithFullMask(pod, oc.GetNetInfo(), nil)
 		if err != nil {
 			// not finding pod IPs on a remote pod is common until the other node wires the pod, suppress it
 			return fmt.Errorf("failed to obtain IPs to add remote pod %s/%s: %w",
@@ -237,7 +249,7 @@ func (oc *DefaultNetworkController) ensureRemoteZonePod(oldPod, pod *corev1.Pod,
 	}
 
 	// either pod is host-networked or its an update for a normal pod (addPort=false case)
-	if oldPod == nil || exGatewayAnnotationsChanged(oldPod, pod) || networkStatusAnnotationsChanged(oldPod, pod) {
+	if oldPod == nil || exGatewayAnnotationsChanged(oldPod, pod) || networkStatusAnnotationsChanged(oldPod, pod) || podBecameReady(oldPod, pod) {
 		// check if this remote pod is serving as an external GW. If so add the routes in the namespace
 		// associated with this remote pod
 		if err := oc.addPodExternalGW(pod); err != nil {
@@ -245,7 +257,7 @@ func (oc *DefaultNetworkController) ensureRemoteZonePod(oldPod, pod *corev1.Pod,
 		}
 	}
 	if kubevirt.IsPodLiveMigratable(pod) {
-		return kubevirt.EnsureRemoteZonePodAddressesToNodeRoute(oc.watchFactory, oc.nbClient, pod, ovntypes.DefaultNetworkName)
+		return kubevirt.EnsureRemoteZonePodAddressesToNodeRoute(oc.watchFactory, oc.nbClient, pod)
 	}
 	return nil
 }
@@ -324,27 +336,32 @@ func (oc *DefaultNetworkController) removeRemoteZonePod(pod *corev1.Pod) error {
 		return fmt.Errorf("failed to remove the remote zone pod: %w", err)
 	}
 
+	// FIXME: there are other things we are probably leaving behind and should
+	// be removed for completed VMs, like per-pod SNAT. Also
+	// removeRemoteZonePodFromNamespaceAddressSet above should probably not be
+	// called for migrations.
+	// https://github.com/ovn-kubernetes/ovn-kubernetes/issues/5627
 	if kubevirt.IsPodLiveMigratable(pod) {
-		ips, err := util.GetPodCIDRsWithFullMask(pod, oc.GetNetInfo())
-		if err != nil && !errors.Is(err, util.ErrNoPodIPFound) {
-			return fmt.Errorf("failed to get pod ips for the pod %s/%s: %w", pod.Namespace, pod.Name, err)
+		allVMPodsAreCompleted, err := kubevirt.AllVMPodsAreCompleted(oc.watchFactory.PodCoreInformer().Lister(), pod)
+		if err != nil {
+			return err
 		}
-		switchName, zoneContainsPodSubnet := kubevirt.ZoneContainsPodSubnet(oc.lsManager, ips)
-		if zoneContainsPodSubnet {
-			if err := oc.lsManager.ReleaseIPs(switchName, ips); err != nil {
-				return err
+
+		if allVMPodsAreCompleted {
+			ips, err := util.GetPodCIDRsWithFullMask(pod, oc.GetNetInfo(), nil)
+			if err != nil && !errors.Is(err, util.ErrNoPodIPFound) {
+				return fmt.Errorf("failed to get pod ips for the pod %s/%s: %w", pod.Namespace, pod.Name, err)
+			}
+			switchName, zoneContainsPodSubnet := kubevirt.ZoneContainsPodSubnet(oc.lsManager, ips)
+			if zoneContainsPodSubnet {
+				if err := oc.lsManager.ReleaseIPs(switchName, ips); err != nil {
+					return err
+				}
 			}
 		}
 	}
 
 	return nil
-}
-
-// WatchEgressFirewall starts the watching of egressfirewall resource and calls
-// back the appropriate handler logic
-func (oc *DefaultNetworkController) WatchEgressFirewall() error {
-	_, err := oc.retryEgressFirewalls.WatchResource()
-	return err
 }
 
 // WatchEgressNodes starts the watching of egress assignable nodes and calls
@@ -373,36 +390,24 @@ func (oc *DefaultNetworkController) WatchEgressIPPods() error {
 }
 
 // syncNodeGateway ensures a node's gateway router is configured
-func (oc *DefaultNetworkController) syncNodeGateway(node *corev1.Node, hostSubnets []*net.IPNet) error {
-	l3GatewayConfig, err := util.ParseNodeL3GatewayAnnotation(node)
+func (oc *DefaultNetworkController) syncNodeGateway(node *corev1.Node) error {
+	gwConfig, err := oc.nodeGatewayConfig(node)
 	if err != nil {
-		return err
+		return fmt.Errorf("error getting gateway config for node %s: %v", node.Name, err)
 	}
 
-	if hostSubnets == nil {
-		hostSubnets, err = util.ParseNodeHostSubnetAnnotation(node, ovntypes.DefaultNetworkName)
-		if err != nil {
-			return err
-		}
+	if err := oc.newGatewayManager(node.Name).SyncGateway(
+		node,
+		gwConfig,
+	); err != nil {
+		return fmt.Errorf("error creating gateway for node %s: %v", node.Name, err)
 	}
 
-	if l3GatewayConfig.Mode == config.GatewayModeDisabled {
-		if err := oc.newGatewayManager(node.Name).Cleanup(); err != nil {
-			return fmt.Errorf("error cleaning up gateway for node %s: %v", node.Name, err)
-		}
-	} else if hostSubnets != nil {
-		var hostAddrs []string
-		if config.Gateway.Mode == config.GatewayModeShared {
-			hostAddrs, err = util.GetNodeHostAddrs(node)
-			if err != nil && !util.IsAnnotationNotSetError(err) {
-				return fmt.Errorf("failed to get host CIDRs for node: %s: %v", node.Name, err)
-			}
-		}
-		if err := oc.syncDefaultGatewayLogicalNetwork(node, l3GatewayConfig, hostSubnets, hostAddrs); err != nil {
-			return fmt.Errorf("error creating gateway for node %s: %v", node.Name, err)
-		}
+	if util.IsPodNetworkAdvertisedAtNode(oc, node.Name) &&
+		config.OVNKubernetesFeature.AdvertisedUDNIsolationMode == config.AdvertisedUDNIsolationModeStrict {
+		return oc.addAdvertisedNetworkIsolation(node.Name)
 	}
-	return nil
+	return oc.deleteAdvertisedNetworkIsolation(node.Name)
 }
 
 // gatewayChanged() compares old annotations to new and returns true if something has changed.
@@ -424,20 +429,6 @@ func nodeSubnetChanged(oldNode, node *corev1.Node, netName string) bool {
 	return util.NodeSubnetAnnotationChangedForNetwork(oldNode, node, netName)
 }
 
-func joinCIDRChanged(oldNode, node *corev1.Node, netName string) bool {
-	var oldCIDRs, newCIDRs map[string]json.RawMessage
-
-	if err := json.Unmarshal([]byte(oldNode.Annotations[util.OVNNodeGRLRPAddrs]), &oldCIDRs); err != nil {
-		klog.Errorf("Failed to unmarshal old node %s annotation: %v", oldNode.Name, err)
-		return false
-	}
-	if err := json.Unmarshal([]byte(node.Annotations[util.OVNNodeGRLRPAddrs]), &newCIDRs); err != nil {
-		klog.Errorf("Failed to unmarshal new node %s annotation: %v", node.Name, err)
-		return false
-	}
-	return !bytes.Equal(oldCIDRs[netName], newCIDRs[netName])
-}
-
 func primaryAddrChanged(oldNode, newNode *corev1.Node) bool {
 	oldIP, _ := util.GetNodePrimaryIP(oldNode)
 	newIP, _ := util.GetNodePrimaryIP(newNode)
@@ -456,15 +447,15 @@ func nodeGatewayMTUSupportChanged(oldNode, node *corev1.Node) bool {
 // shouldUpdateNode() determines if the ovn-kubernetes plugin should update the state of the node.
 // ovn-kube should not perform an update if it does not assign a hostsubnet, or if you want to change
 // whether or not ovn-kubernetes assigns a hostsubnet
-func shouldUpdateNode(node, oldNode *corev1.Node) (bool, error) {
+func shouldUpdateNode(node, oldNode *corev1.Node) bool {
 	newNoHostSubnet := util.NoHostSubnet(node)
 	oldNoHostSubnet := util.NoHostSubnet(oldNode)
 
 	if oldNoHostSubnet && newNoHostSubnet {
-		return false, nil
+		return false
 	}
 
-	return true, nil
+	return true
 }
 
 func (oc *DefaultNetworkController) StartServiceController(wg *sync.WaitGroup, runRepair bool) error {
@@ -474,7 +465,7 @@ func (oc *DefaultNetworkController) StartServiceController(wg *sync.WaitGroup, r
 	err := oc.svcController.Run(5, oc.stopChan, wg, runRepair, useLBGroups, oc.svcTemplateSupport)
 	if err != nil {
 
-		return fmt.Errorf("error running OVN Kubernetes Services controller: %v", err)
+		return fmt.Errorf("error running OVN-Kubernetes Services controller: %v", err)
 	}
 	return nil
 }
@@ -489,7 +480,7 @@ func (oc *DefaultNetworkController) InitEgressServiceZoneController() (*egresssv
 		return nil
 	}
 	// used only when IC=true
-	createDefaultNodeRouteToExternal := func(_ libovsdbclient.Client, _, _ string, _ []config.CIDRNetworkEntry) error {
+	createDefaultNodeRouteToExternal := func(_ libovsdbclient.Client, _, _ string, _ []config.CIDRNetworkEntry, _ []*net.IPNet) error {
 		return nil
 	}
 
@@ -499,7 +490,7 @@ func (oc *DefaultNetworkController) InitEgressServiceZoneController() (*egresssv
 		createDefaultNodeRouteToExternal = libovsdbutil.CreateDefaultRouteToExternal
 	}
 
-	return egresssvc_zone.NewController(oc.GetNetInfo(), DefaultNetworkControllerName, oc.client, oc.nbClient, oc.addressSetFactory,
+	return egresssvc_zone.NewController(oc.GetNetInfo(), ovntypes.DefaultNetworkControllerName, oc.client, oc.nbClient, oc.addressSetFactory,
 		initClusterEgressPolicies, ensureNodeNoReroutePolicies,
 		createDefaultNodeRouteToExternal,
 		oc.stopChan, oc.watchFactory.EgressServiceInformer(), oc.watchFactory.ServiceCoreInformer(),
@@ -510,7 +501,7 @@ func (oc *DefaultNetworkController) InitEgressServiceZoneController() (*egresssv
 func (oc *DefaultNetworkController) newANPController() error {
 	var err error
 	oc.anpController, err = anpcontroller.NewController(
-		DefaultNetworkControllerName,
+		ovntypes.DefaultNetworkControllerName,
 		oc.nbClient,
 		oc.kube.ANPClient,
 		oc.watchFactory.ANPInformer(),
@@ -525,4 +516,14 @@ func (oc *DefaultNetworkController) newANPController() error {
 		oc.observManager,
 	)
 	return err
+}
+
+func (oc *DefaultNetworkController) newNetworkConnectController() error {
+	oc.networkConnectController = networkconnectcontroller.NewController(
+		oc.zone,
+		oc.nbClient,
+		oc.watchFactory,
+		oc.networkManager,
+	)
+	return nil
 }

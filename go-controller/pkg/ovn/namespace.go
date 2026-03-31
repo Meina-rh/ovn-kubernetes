@@ -6,15 +6,19 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
-	"github.com/ovn-org/libovsdb/ovsdb"
+	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
-	utilerrors "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util/errors"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/generator/udn"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
+	utilerrors "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util/errors"
 )
 
 func (oc *DefaultNetworkController) getRoutingExternalGWs(nsInfo *namespaceInfo) *gatewayInfo {
@@ -165,7 +169,7 @@ func (oc *DefaultNetworkController) updateNamespace(old, newer *corev1.Namespace
 					if util.PodWantsHostNetwork(pod) {
 						continue
 					}
-					podIPs, err := util.GetPodIPsOfNetwork(pod, oc.GetNetInfo())
+					podIPs, err := util.GetPodIPsOfNetwork(pod, oc.GetNetInfo(), nil)
 					if err != nil {
 						errors = append(errors, fmt.Errorf("unable to get pod %q IPs for SNAT rule removal err (%v)", logicalPort, err))
 					}
@@ -234,9 +238,24 @@ func (oc *DefaultNetworkController) updateNamespace(old, newer *corev1.Namespace
 				if err != nil {
 					errors = append(errors, err)
 				} else {
-					if extIPs, err := getExternalIPsGR(oc.watchFactory, pod.Spec.NodeName); err != nil {
-						errors = append(errors, err)
-					} else if err = addOrUpdatePodSNAT(oc.nbClient, oc.GetNetworkScopedGWRouterName(pod.Spec.NodeName), extIPs, podAnnotation.IPs); err != nil {
+					// Helper function to handle the complex SNAT operations
+					handleSNATOps := func() error {
+						ops, err := oc.AddPodSNATOps(pod.Spec.NodeName, podAnnotation.IPs)
+						if err != nil {
+							return err
+						}
+
+						// Execute all operations in a single transaction
+						if len(ops) > 0 {
+							_, err = libovsdbops.TransactAndCheck(oc.nbClient, ops)
+							if err != nil {
+								return fmt.Errorf("failed to update SNAT for pod %s on router %s: %v", pod.Name, oc.GetNetworkScopedGWRouterName(pod.Spec.NodeName), err)
+							}
+						}
+						return nil
+					}
+
+					if err := handleSNATOps(); err != nil {
 						errors = append(errors, err)
 					}
 				}
@@ -250,14 +269,23 @@ func (oc *DefaultNetworkController) updateNamespace(old, newer *corev1.Namespace
 		if err := oc.updateNamespaceAclLogging(old.Name, aclAnnotation, nsInfo); err != nil {
 			errors = append(errors, err)
 		}
-		// Trigger an egress fw logging update - this will only happen if an egress firewall exists for the NS, otherwise
-		// this will not do anything.
-		updated, err := oc.updateACLLoggingForEgressFirewall(old.Name, nsInfo)
-		if err != nil {
-			errors = append(errors, err)
-		} else if updated {
-			klog.Infof("Namespace %s: EgressFirewall ACL logging setting updated to deny=%s allow=%s",
-				old.Name, nsInfo.aclLogging.Deny, nsInfo.aclLogging.Allow)
+		if oc.efController != nil {
+			// Trigger an egress fw logging update - this will only happen if an egress firewall exists for the NS, otherwise
+			// this will not do anything.
+			egressFirewalls, err := oc.watchFactory.EgressFirewallInformer().Lister().EgressFirewalls(old.Name).List(labels.Everything())
+			if err != nil {
+				errors = append(errors, err)
+			}
+			for _, fw := range egressFirewalls {
+				fwKey, err := cache.MetaNamespaceKeyFunc(fw)
+				if err != nil {
+					klog.Errorf("Failed to get key for EgressFirewall %s/%s, will not update ACL logging: %v", old.Name, fwKey, err)
+					continue
+				}
+				klog.Infof("Namespace %s: EgressFirewall ACL logging setting updating to deny=%s allow=%s",
+					old.Name, nsInfo.aclLogging.Deny, nsInfo.aclLogging.Allow)
+				oc.efController.Reconcile(fwKey)
+			}
 		}
 	}
 
@@ -336,21 +364,22 @@ func (oc *DefaultNetworkController) getHostNamespaceAddressesForNode(node *corev
 		return nil, err
 	}
 	for _, hostSubnet := range hostSubnets {
-		mgmtIfAddr := util.GetNodeManagementIfAddr(hostSubnet)
+		mgmtIfAddr := oc.GetNodeManagementIP(hostSubnet)
 		ips = append(ips, mgmtIfAddr.IP)
 	}
 	// for shared gateway mode we will use LRP IPs to SNAT host network traffic
 	// so add these to the address set.
-	lrpIPs, err := util.ParseNodeGatewayRouterJoinAddrs(node, oc.GetNetworkName())
-	if err != nil {
-		if util.IsAnnotationNotSetError(err) {
-			// FIXME(tssurya): This is present for backwards compatibility
-			// Remove me a few months from now
-			var err1 error
-			lrpIPs, err1 = util.ParseNodeGatewayRouterLRPAddrs(node)
-			if err1 != nil {
-				return nil, fmt.Errorf("failed to get join switch port IP address for node %s: %v/%v", node.Name, err, err1)
-			}
+	lrpIPs, gwIPsErr := udn.GetGWRouterIPs(node, oc.GetNetInfo())
+	if gwIPsErr != nil {
+		if !util.IsAnnotationNotSetError(gwIPsErr) {
+			return nil, gwIPsErr
+		}
+		// FIXME(tssurya): This is present for backwards compatibility
+		// Remove me a few months from now
+		var lrpAddrsErr error
+		lrpIPs, lrpAddrsErr = util.ParseNodeGatewayRouterLRPAddrs(node)
+		if lrpAddrsErr != nil {
+			return nil, fmt.Errorf("failed to fallback to annotations after error %q: %w", gwIPsErr, lrpAddrsErr)
 		}
 	}
 

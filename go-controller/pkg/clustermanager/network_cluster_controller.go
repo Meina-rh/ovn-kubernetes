@@ -13,24 +13,29 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	cache "k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
+	k8snodeutil "k8s.io/component-helpers/node/util"
 	"k8s.io/klog/v2"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/id"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/ip/subnet"
-	annotationalloc "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/pod"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/clustermanager/node"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/clustermanager/pod"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/networkmanager"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/persistentips"
-	objretry "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/retry"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/id"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/ip/subnet"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/mac"
+	annotationalloc "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/pod"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/clustermanager/node"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/clustermanager/pod"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	sharednode "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/controllers/node"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/kube"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/metrics"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/networkmanager"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/persistentips"
+	objretry "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/retry"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 type NetworkStatusReporter func(networkName string, fieldManager string, condition *metav1.Condition, events ...*util.EventDetails) error
@@ -45,11 +50,7 @@ type networkClusterController struct {
 	stopChan     chan struct{}
 	wg           *sync.WaitGroup
 
-	// node events factory handler
-	nodeHandler *factory.Handler
-
-	// retry framework for nodes
-	retryNodes *objretry.RetryFramework
+	nodeReconciler *clusterManagerNodeController
 
 	// retry framework for L2 pod ip allocation
 	podHandler *factory.Handler
@@ -75,11 +76,93 @@ type networkClusterController struct {
 	// nodeName: errMessage
 	nodeErrors     map[string]string
 	nodeErrorsLock sync.Mutex
+	nodeSyncFailed sync.Map
 	// Error condition only reports one of the failed nodes.
 	// To avoid changing that error report with every update, we store reported error node.
 	reportedErrorNode string
 
+	// dynamicUDNNodeRefs tracks active nodes for dynamic UDN allocation.
+	dynamicUDNNodeRefsLock sync.Mutex
+	dynamicUDNNodeRefs     map[string]bool
+	dynamicUDNNodeCount    int
+
+	nadKeysLock sync.Mutex
+	lastNADKeys sets.Set[string]
+
 	util.ReconcilableNetInfo
+}
+
+// HandleNetworkRefChange satisfies the NetworkController interface; it updates dynamic UDN metrics and status.
+func (ncc *networkClusterController) HandleNetworkRefChange(nodeName string, active bool) {
+	if !config.OVNKubernetesFeature.EnableDynamicUDNAllocation || !ncc.IsUserDefinedNetwork() {
+		return
+	}
+
+	nodeCount, changed := ncc.updateDynamicUDNNodeRefs(nodeName, active)
+	if !changed {
+		return
+	}
+	networkName := ncc.GetNetworkName()
+	metrics.SetDynamicUDNNodeCount(networkName, float64(nodeCount))
+	klog.V(5).Infof("Updated metric: network=%s nodes=%d", networkName, nodeCount)
+
+	var cond *metav1.Condition
+	if nodeCount == 0 {
+		msg := "no nodes currently rendered with network"
+		cond = &metav1.Condition{
+			Type:               "NodesSelected",
+			Status:             metav1.ConditionFalse,
+			Reason:             "DynamicAllocation",
+			Message:            msg,
+			LastTransitionTime: metav1.Now(),
+		}
+	} else {
+		msg := fmt.Sprintf("%d node(s) rendered with network", nodeCount)
+		cond = &metav1.Condition{
+			Type:               "NodesSelected",
+			Status:             metav1.ConditionTrue,
+			Reason:             "DynamicAllocation",
+			Message:            msg,
+			LastTransitionTime: metav1.Now(),
+		}
+	}
+	if ncc.statusReporter != nil {
+		if err := ncc.statusReporter(
+			networkName,
+			"ClusterManager", // FieldManager - must be unique per subsystem
+			cond,
+		); err != nil {
+			klog.Errorf("Failed to update NodesSelected condition for %s: %v", networkName, err)
+		} else {
+			klog.V(4).Infof("Updated Dynamic Allocation NodesSelected condition for %s: %s", networkName, cond.Message)
+		}
+	}
+}
+
+func (ncc *networkClusterController) updateDynamicUDNNodeRefs(nodeName string, active bool) (int, bool) {
+	ncc.dynamicUDNNodeRefsLock.Lock()
+	defer ncc.dynamicUDNNodeRefsLock.Unlock()
+
+	if ncc.dynamicUDNNodeRefs == nil {
+		ncc.dynamicUDNNodeRefs = map[string]bool{}
+	}
+
+	current := ncc.dynamicUDNNodeRefs[nodeName]
+	if active == current {
+		return ncc.dynamicUDNNodeCount, false
+	}
+
+	if active {
+		ncc.dynamicUDNNodeRefs[nodeName] = true
+		ncc.dynamicUDNNodeCount++
+		return ncc.dynamicUDNNodeCount, true
+	}
+
+	delete(ncc.dynamicUDNNodeRefs, nodeName)
+	if ncc.dynamicUDNNodeCount > 0 {
+		ncc.dynamicUDNNodeCount--
+	}
+	return ncc.dynamicUDNNodeCount, true
 }
 
 func newNetworkClusterController(
@@ -89,6 +172,7 @@ func newNetworkClusterController(
 	recorder record.EventRecorder,
 	networkManager networkmanager.Interface,
 	errorReporter NetworkStatusReporter,
+	nodeReconciler *clusterManagerNodeController,
 ) *networkClusterController {
 	kube := &kube.KubeOVN{
 		Kube: kube.Kube{
@@ -107,6 +191,7 @@ func newNetworkClusterController(
 		wg:                  wg,
 		recorder:            recorder,
 		networkManager:      networkManager,
+		nodeReconciler:      nodeReconciler,
 		statusReporter:      errorReporter,
 		nodeErrors:          make(map[string]string),
 		nodeErrorsLock:      sync.Mutex{},
@@ -115,17 +200,17 @@ func newNetworkClusterController(
 	return ncc
 }
 
-func newDefaultNetworkClusterController(netInfo util.NetInfo, ovnClient *util.OVNClusterManagerClientset, wf *factory.WatchFactory, recorder record.EventRecorder) *networkClusterController {
+func newDefaultNetworkClusterController(netInfo util.NetInfo, ovnClient *util.OVNClusterManagerClientset, wf *factory.WatchFactory, recorder record.EventRecorder, nodeReconciler *clusterManagerNodeController) *networkClusterController {
 	// use an allocator that can only allocate a single network ID for the
 	// defaiult network
 	networkIDAllocator := id.NewIDAllocator(types.DefaultNetworkName, 1)
 	// Reserve the id 0 for the default network.
-	err := networkIDAllocator.ReserveID(types.DefaultNetworkName, defaultNetworkID)
+	err := networkIDAllocator.ReserveID(types.DefaultNetworkName, types.DefaultNetworkID)
 	if err != nil {
 		panic(fmt.Errorf("could not reserve default network ID: %w", err))
 	}
 
-	return newNetworkClusterController(netInfo, ovnClient, wf, recorder, networkmanager.Default().Interface(), nil)
+	return newNetworkClusterController(netInfo, ovnClient, wf, recorder, networkmanager.Default().Interface(), nil, nodeReconciler)
 }
 
 func (ncc *networkClusterController) hasPodAllocation() bool {
@@ -153,7 +238,7 @@ func (ncc *networkClusterController) hasNodeAllocation() bool {
 		return config.OVNKubernetesFeature.EnableInterconnect
 	default:
 		// we need to allocate network IDs and subnets
-		return !ncc.IsSecondary()
+		return !ncc.IsUserDefinedNetwork()
 	}
 }
 
@@ -175,7 +260,7 @@ func (ncc *networkClusterController) init() error {
 	if util.DoesNetworkRequireTunnelIDs(ncc.GetNetInfo()) {
 		ncc.tunnelIDAllocator = id.NewIDAllocator(ncc.GetNetworkName(), types.MaxLogicalPortTunnelKey)
 		// Reserve the id 0. We don't want to assign this id to any of the pods or nodes.
-		if err = ncc.tunnelIDAllocator.ReserveID("zero", util.NoID); err != nil {
+		if err = ncc.tunnelIDAllocator.ReserveID("zero", types.NoTunnelID); err != nil {
 			return err
 		}
 		if util.IsNetworkSegmentationSupportEnabled() && ncc.IsPrimaryNetwork() {
@@ -196,7 +281,7 @@ func (ncc *networkClusterController) init() error {
 							node.Name, ncc.GetNetworkName(), err)
 					}
 				}
-				if tunnelID != util.InvalidID {
+				if tunnelID != types.InvalidID {
 					if err := ncc.tunnelIDAllocator.ReserveID(ncc.GetNetworkName()+"_"+node.Name, tunnelID); err != nil {
 						return fmt.Errorf("unable to reserve id for network %s, node %s: %w", ncc.GetNetworkName(), node.Name, err)
 					}
@@ -206,8 +291,6 @@ func (ncc *networkClusterController) init() error {
 	}
 
 	if ncc.hasNodeAllocation() {
-		ncc.retryNodes = ncc.newRetryFramework(factory.NodeType, true)
-
 		ncc.nodeAllocator = node.NewNodeAllocator(networkID, ncc.GetNetInfo(), ncc.watchFactory.NodeCoreInformer().Lister(), ncc.kube, ncc.tunnelIDAllocator)
 		err := ncc.nodeAllocator.Init()
 		if err != nil {
@@ -228,7 +311,8 @@ func (ncc *networkClusterController) init() error {
 			ipamClaimsReconciler   persistentips.PersistentAllocations
 		)
 
-		if ncc.allowPersistentIPs() {
+		persistentIPsEnabled := ncc.allowPersistentIPs()
+		if persistentIPsEnabled {
 			ncc.retryIPAMClaims = ncc.newRetryFramework(factory.IPAMClaimsType, true)
 			ncc.ipamClaimReconciler = persistentips.NewIPAMClaimReconciler(
 				ncc.kube,
@@ -238,11 +322,19 @@ func (ncc *networkClusterController) init() error {
 			ipamClaimsReconciler = ncc.ipamClaimReconciler
 		}
 
+		var podAllocOpts []annotationalloc.AllocatorOption
+		if util.IsPreconfiguredUDNAddressesEnabled() &&
+			ncc.IsPrimaryNetwork() &&
+			ncc.TopologyType() == types.Layer2Topology {
+			podAllocOpts = append(podAllocOpts, annotationalloc.WithMACRegistry(mac.NewManager()))
+		}
+
 		podAllocationAnnotator = annotationalloc.NewPodAnnotationAllocator(
 			ncc.GetNetInfo(),
 			ncc.watchFactory.PodCoreInformer().Lister(),
 			ncc.kube,
 			ipamClaimsReconciler,
+			podAllocOpts...,
 		)
 
 		ncc.podAllocator = pod.NewPodAllocator(
@@ -253,6 +345,7 @@ func (ncc *networkClusterController) init() error {
 			ncc.networkManager,
 			ncc.recorder,
 			ncc.tunnelIDAllocator,
+			ncc.watchFactory.NodeCoreInformer().Lister(),
 		)
 		if err := ncc.podAllocator.Init(); err != nil {
 			return fmt.Errorf("failed to initialize pod ip allocator: %w", err)
@@ -267,7 +360,7 @@ func (ncc *networkClusterController) init() error {
 // When at least one node reports an error, condition will be set to false and an event with node-specific error will be
 // generated.
 // Call this function after every node event handling, set handlerErr to nil to report no error.
-// There are potential optimization to when an error should be reported, see https://github.com/ovn-org/ovn-kubernetes/pull/4647#discussion_r1763352619.
+// There are potential optimization to when an error should be reported, see https://github.com/ovn-kubernetes/ovn-kubernetes/pull/4647#discussion_r1763352619.
 func (ncc *networkClusterController) updateNetworkStatus(nodeName string, handlerErr error) error {
 	if ncc.statusReporter == nil {
 		return nil
@@ -365,6 +458,86 @@ func getNetworkAllocationUDNCondition(errorNode string) *metav1.Condition {
 	return condition
 }
 
+func (ncc *networkClusterController) SyncNodes(nodes []*corev1.Node) error {
+	objs := make([]interface{}, 0, len(nodes))
+	for _, node := range nodes {
+		objs = append(objs, node)
+	}
+	return ncc.nodeAllocator.Sync(objs)
+}
+
+func (ncc *networkClusterController) ReconcileNode(oldNode, newNode *corev1.Node, oldState, newState *sharednode.NodeAnnotationState) error {
+	var (
+		nodeName string
+		err      error
+	)
+
+	switch {
+	case newNode == nil:
+		nodeName = oldNode.Name
+		err = ncc.nodeAllocator.HandleDeleteNode(oldNode)
+		if err == nil {
+			ncc.nodeSyncFailed.Delete(nodeName)
+		}
+	case oldNode == nil:
+		nodeName = newNode.Name
+		err = ncc.nodeAllocator.HandleAddUpdateNodeEvent(newNode)
+		if err == nil {
+			ncc.clearInitialNodeNetworkUnavailableCondition(newNode)
+			ncc.nodeSyncFailed.Delete(nodeName)
+		} else {
+			ncc.nodeSyncFailed.Store(nodeName, true)
+		}
+	default:
+		nodeName = newNode.Name
+		_, nodeFailed := ncc.nodeSyncFailed.Load(nodeName)
+		_, nodeCondition := k8snodeutil.GetNodeCondition(&newNode.Status, corev1.NodeNetworkUnavailable)
+		nodeNetworkUnavailable := nodeCondition != nil && nodeCondition.Status == corev1.ConditionTrue
+		if !ncc.shouldReconcileNode(oldNode, newNode, oldState, newState, nodeFailed, nodeNetworkUnavailable) {
+			return nil
+		}
+		err = ncc.nodeAllocator.HandleAddUpdateNodeEvent(newNode)
+		if err == nil {
+			ncc.clearInitialNodeNetworkUnavailableCondition(newNode)
+			ncc.nodeSyncFailed.Delete(nodeName)
+		} else {
+			ncc.nodeSyncFailed.Store(nodeName, true)
+		}
+	}
+
+	statusErr := ncc.updateNetworkStatus(nodeName, err)
+	return errors.Join(err, statusErr)
+}
+
+func (ncc *networkClusterController) shouldReconcileNode(
+	oldNode, newNode *corev1.Node,
+	oldState, newState *sharednode.NodeAnnotationState,
+	nodeFailed, nodeNetworkUnavailable bool,
+) bool {
+	if nodeFailed || nodeNetworkUnavailable {
+		return true
+	}
+	if util.NoHostSubnet(oldNode) != util.NoHostSubnet(newNode) {
+		return true
+	}
+	if ncc.nodeAllocator.NeedsNodeAllocationWithState(newNode, newState) {
+		return true
+	}
+	return ncc.relevantNodeAnnotationsChanged(oldState, newState)
+}
+
+func (ncc *networkClusterController) relevantNodeAnnotationsChanged(oldState, newState *sharednode.NodeAnnotationState) bool {
+	if ncc.nodeAllocator.HasNodeSubnetAllocation() &&
+		sharednode.NodeSubnetAnnotationChangedForNetworkWithState(oldState, newState, ncc.GetNetworkName()) {
+		return true
+	}
+	if ncc.nodeAllocator.HasNodeTunnelIDAllocation() &&
+		sharednode.TunnelIDAnnotationChangedForNetworkWithState(oldState, newState, ncc.GetNetworkName()) {
+		return true
+	}
+	return false
+}
+
 // Start the network cluster controller. Depending on the cluster configuration
 // and type of network, it does the following:
 //   - initializes the node allocator and starts listening to node events
@@ -382,13 +555,14 @@ func (ncc *networkClusterController) Start(_ context.Context) error {
 
 	if ncc.hasNodeAllocation() {
 		start = time.Now()
-		klog.Infof("Cluster manager network controller %q starting node watcher...", ncc.GetNetworkName())
-		nodeHandler, err := ncc.retryNodes.WatchResource()
-		if err != nil {
-			return fmt.Errorf("cluster manager network controller %q - unable to watch nodes: %w", ncc.GetNetworkName(), err)
+		klog.Infof("Cluster manager network controller %q registering shared node handler...", ncc.GetNetworkName())
+		if ncc.nodeReconciler == nil {
+			return fmt.Errorf("cluster manager network controller %q has node allocation but no shared node controller", ncc.GetNetworkName())
 		}
-		klog.Infof("Cluster manager network controller %q completed watch nodes. Took: %v", ncc.GetNetworkName(), time.Since(start))
-		ncc.nodeHandler = nodeHandler
+		if err := ncc.nodeReconciler.RegisterNetworkController(ncc); err != nil {
+			return err
+		}
+		klog.Infof("Cluster manager network controller %q completed shared node registration. Took: %v", ncc.GetNetworkName(), time.Since(start))
 	}
 
 	if ncc.hasPodAllocation() {
@@ -427,8 +601,8 @@ func (ncc *networkClusterController) Stop() {
 		ncc.watchFactory.RemoveIPAMClaimsHandler(ncc.ipamClaimHandler)
 	}
 
-	if ncc.nodeHandler != nil {
-		ncc.watchFactory.RemoveNodeHandler(ncc.nodeHandler)
+	if ncc.hasNodeAllocation() && ncc.nodeReconciler != nil {
+		ncc.nodeReconciler.DeregisterNetworkController(ncc.GetNetworkName())
 	}
 
 	if ncc.podHandler != nil {
@@ -447,13 +621,13 @@ func (ncc *networkClusterController) newRetryFramework(objectType reflect.Type, 
 			syncFunc: nil,
 		},
 	}
-	return objretry.NewRetryFramework(ncc.stopChan, ncc.wg, ncc.watchFactory, resourceHandler)
+	return objretry.NewRetryFramework(ncc.GetNetworkName()+"/clustermanager", ncc.stopChan, ncc.wg, ncc.watchFactory, resourceHandler)
 }
 
-// Cleanup the subnet annotations from the node for the secondary networks
+// Cleanup the subnet annotations from the node for the User Defined Networks
 func (ncc *networkClusterController) Cleanup() error {
-	if !ncc.IsSecondary() {
-		return fmt.Errorf("default network can't be cleaned up")
+	if !ncc.IsUserDefinedNetwork() {
+		return fmt.Errorf("default network cannot be cleaned up")
 	}
 
 	if ncc.hasNodeAllocation() {
@@ -467,18 +641,29 @@ func (ncc *networkClusterController) Cleanup() error {
 }
 
 func (ncc *networkClusterController) Reconcile(netInfo util.NetInfo) error {
-	reconcilePendingPods := !ncc.ReconcilableNetInfo.EqualNADs(netInfo.GetNADs()...)
+	nadKeys := ncc.networkManager.GetNADKeysForNetwork(netInfo.GetNetworkName())
+	reconcilePendingPods := ncc.updateNADKeysChanged(nadKeys)
 	// update network information, point of no return
 	err := util.ReconcileNetInfo(ncc.ReconcilableNetInfo, netInfo)
 	if err != nil {
 		klog.Errorf("Failed to reconcile network %s: %v", ncc.GetNetworkName(), err)
 	}
 	if reconcilePendingPods && ncc.retryPods != nil {
-		if err := objretry.RequeuePendingPods(ncc.kube, ncc.GetNetInfo(), ncc.retryPods); err != nil {
+		if err := objretry.RequeuePendingPods(ncc.watchFactory, ncc.GetNetInfo(), ncc.retryPods); err != nil {
 			klog.Errorf("Failed to requeue pending pods for network %s: %v", ncc.GetNetworkName(), err)
 		}
 	}
 	return nil
+}
+
+func (ncc *networkClusterController) updateNADKeysChanged(nadKeys []string) bool {
+	ncc.nadKeysLock.Lock()
+	defer ncc.nadKeysLock.Unlock()
+
+	next := sets.New(nadKeys...)
+	changed := ncc.lastNADKeys == nil || !next.Equal(ncc.lastNADKeys)
+	ncc.lastNADKeys = next
+	return changed
 }
 
 // networkClusterControllerEventHandler object handles the events
@@ -500,8 +685,6 @@ func (h *networkClusterControllerEventHandler) FilterOutResource(_ interface{}) 
 // AddResource adds the specified object to the cluster according to its type and
 // returns the error, if any, yielded during object creation.
 func (h *networkClusterControllerEventHandler) AddResource(obj interface{}, _ bool) error {
-	var err error
-
 	switch h.objType {
 	case factory.PodType:
 		pod, ok := obj.(*corev1.Pod)
@@ -511,22 +694,6 @@ func (h *networkClusterControllerEventHandler) AddResource(obj interface{}, _ bo
 		err := h.ncc.podAllocator.Reconcile(nil, pod)
 		if err != nil {
 			return err
-		}
-	case factory.NodeType:
-		node, ok := obj.(*corev1.Node)
-		if !ok {
-			return fmt.Errorf("could not cast %T object to *corev1.Node", obj)
-		}
-		err = h.ncc.nodeAllocator.HandleAddUpdateNodeEvent(node)
-		if err == nil {
-			h.clearInitialNodeNetworkUnavailableCondition(node)
-		}
-		statusErr := h.ncc.updateNetworkStatus(node.Name, err)
-		joinedErr := errors.Join(err, statusErr)
-		if joinedErr != nil {
-			klog.Infof("Cluster Manager Network Controller %q: Node add failed for %s, will try again later: %v",
-				h.ncc.GetNetworkName(), node.Name, joinedErr)
-			return joinedErr
 		}
 	case factory.IPAMClaimsType:
 		return nil
@@ -540,8 +707,6 @@ func (h *networkClusterControllerEventHandler) AddResource(obj interface{}, _ bo
 // to its type and returns the error, if any, yielded during the object update.
 // The inRetryCache boolean argument is to indicate if the given resource is in the retryCache or not.
 func (h *networkClusterControllerEventHandler) UpdateResource(oldObj, newObj interface{}, _ bool) error {
-	var err error
-
 	switch h.objType {
 	case factory.PodType:
 		old, ok := oldObj.(*corev1.Pod)
@@ -554,22 +719,6 @@ func (h *networkClusterControllerEventHandler) UpdateResource(oldObj, newObj int
 		}
 		err := h.ncc.podAllocator.Reconcile(old, new)
 		if err != nil {
-			return err
-		}
-	case factory.NodeType:
-		node, ok := newObj.(*corev1.Node)
-		if !ok {
-			return fmt.Errorf("could not cast %T object to *corev1.Node", newObj)
-		}
-		err = h.ncc.nodeAllocator.HandleAddUpdateNodeEvent(node)
-		if err == nil {
-			h.clearInitialNodeNetworkUnavailableCondition(node)
-		}
-		statusErr := h.ncc.updateNetworkStatus(node.Name, err)
-		joinedErr := errors.Join(err, statusErr)
-		if joinedErr != nil {
-			klog.Infof("Cluster Manager Network Controller %q: Node update failed for %s, will try again later: %v",
-				h.ncc.GetNetworkName(), node.Name, err)
 			return err
 		}
 	case factory.IPAMClaimsType:
@@ -593,14 +742,6 @@ func (h *networkClusterControllerEventHandler) DeleteResource(obj, _ interface{}
 		if err != nil {
 			return err
 		}
-	case factory.NodeType:
-		node, ok := obj.(*corev1.Node)
-		if !ok {
-			return fmt.Errorf("could not cast obj of type %T to *knet.Node", obj)
-		}
-		err := h.ncc.nodeAllocator.HandleDeleteNode(node)
-		statusErr := h.ncc.updateNetworkStatus(node.Name, err)
-		return errors.Join(err, statusErr)
 	case factory.IPAMClaimsType:
 		ipamClaim, ok := obj.(*ipamclaimsapi.IPAMClaim)
 		if !ok {
@@ -629,8 +770,6 @@ func (h *networkClusterControllerEventHandler) SyncFunc(objs []interface{}) erro
 		switch h.objType {
 		case factory.PodType:
 			syncFunc = h.ncc.podAllocator.Sync
-		case factory.NodeType:
-			syncFunc = h.ncc.nodeAllocator.Sync
 		case factory.IPAMClaimsType:
 			syncFunc = func(claims []interface{}) error {
 				return h.ncc.ipamClaimReconciler.Sync(
@@ -649,23 +788,7 @@ func (h *networkClusterControllerEventHandler) SyncFunc(objs []interface{}) erro
 	return syncFunc(objs)
 }
 
-func (h *networkClusterControllerEventHandler) AreResourcesEqual(obj1, obj2 interface{}) (bool, error) {
-	// switch based on type
-	if h.objType == factory.NodeType {
-		node1, ok := obj1.(*corev1.Node)
-		if !ok {
-			return false, fmt.Errorf("could not cast obj1 of type %T to *corev1.Node", obj1)
-		}
-		node2, ok := obj2.(*corev1.Node)
-		if !ok {
-			return false, fmt.Errorf("could not cast obj2 of type %T to *corev1.Node", obj2)
-		}
-
-		// network cluster controller only updates the node/hybrid subnet annotations.
-		// Check if the annotations have changed.
-		return reflect.DeepEqual(node1.Annotations, node2.Annotations), nil
-	}
-
+func (h *networkClusterControllerEventHandler) AreResourcesEqual(_, _ interface{}) (bool, error) {
 	return false, nil
 }
 
@@ -682,8 +805,6 @@ func (h *networkClusterControllerEventHandler) GetResourceFromInformerCache(key 
 	}
 
 	switch h.objType {
-	case factory.NodeType:
-		obj, err = h.ncc.watchFactory.GetNode(name)
 	case factory.PodType:
 		obj, err = h.ncc.watchFactory.GetPod(namespace, name)
 	case factory.IPAMClaimsType:
@@ -702,7 +823,7 @@ func (h *networkClusterControllerEventHandler) GetResourceFromInformerCache(key 
 // TODO: make upstream kubelet more flexible with overlays and GCE so this
 // condition doesn't get added for network plugins that don't want it, and then
 // we can remove this function.
-func (h *networkClusterControllerEventHandler) clearInitialNodeNetworkUnavailableCondition(origNode *corev1.Node) {
+func (ncc *networkClusterController) clearInitialNodeNetworkUnavailableCondition(origNode *corev1.Node) {
 	// If it is not a Cloud Provider node, then nothing to do.
 	if origNode.Spec.ProviderID == "" {
 		return
@@ -712,7 +833,7 @@ func (h *networkClusterControllerEventHandler) clearInitialNodeNetworkUnavailabl
 	resultErr := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		var err error
 
-		oldNode, err := h.ncc.watchFactory.GetNode(origNode.Name)
+		oldNode, err := ncc.watchFactory.GetNode(origNode.Name)
 		if err != nil {
 			return err
 		}
@@ -727,7 +848,7 @@ func (h *networkClusterControllerEventHandler) clearInitialNodeNetworkUnavailabl
 					condition.Reason = "RouteCreated"
 					condition.Message = "ovn-kube cleared kubelet-set NoRouteCreated"
 					condition.LastTransitionTime = metav1.Now()
-					if err = h.ncc.kube.UpdateNodeStatus(node); err == nil {
+					if err = ncc.kube.UpdateNodeStatus(node); err == nil {
 						cleared = true
 					}
 				}
@@ -750,22 +871,22 @@ func newIPAllocatorForNetwork(netInfo util.NetInfo) (subnet.Allocator, error) {
 
 	subnets := netInfo.Subnets()
 	ipNets := make([]*net.IPNet, 0, len(subnets))
-	excludeSubnets := netInfo.ExcludeSubnets()
+	excludeSubnets := append(netInfo.ExcludeSubnets(), netInfo.InfrastructureSubnets()...)
+
 	for _, subnet := range subnets {
 		ipNets = append(ipNets, subnet.CIDR)
-		if isLayer2UserDefinedPrimaryNetwork(netInfo) {
-			excludeSubnets = append(
-				excludeSubnets,
-				autoExcludeCIDRs(subnet.CIDR)...,
-			)
-		}
 	}
 
-	if err := ipAllocator.AddOrUpdateSubnet(
-		netInfo.GetNetworkName(),
-		ipNets,
-		excludeSubnets...,
-	); err != nil {
+	if isLayer2UserDefinedPrimaryNetwork(netInfo) && len(netInfo.InfrastructureSubnets()) == 0 {
+		excludeSubnets = append(excludeSubnets, infrastructureExcludeCIDRs(netInfo)...)
+	}
+
+	if err := ipAllocator.AddOrUpdateSubnet(subnet.SubnetConfig{
+		Name:            netInfo.GetNetworkName(),
+		Subnets:         ipNets,
+		ReservedSubnets: netInfo.ReservedSubnets(),
+		ExcludeSubnets:  excludeSubnets,
+	}); err != nil {
 		return nil, err
 	}
 
@@ -776,11 +897,17 @@ func isLayer2UserDefinedPrimaryNetwork(netInfo util.NetInfo) bool {
 	return netInfo.IsPrimaryNetwork() && netInfo.TopologyType() == types.Layer2Topology
 }
 
-func autoExcludeCIDRs(subnet *net.IPNet) []*net.IPNet {
-	gwIP := util.GetNodeGatewayIfAddr(subnet).IP
-	mgmtPortIP := util.GetNodeManagementIfAddr(subnet).IP
-	return []*net.IPNet{
-		{IP: gwIP, Mask: util.GetIPFullMask(gwIP)},
-		{IP: mgmtPortIP, Mask: util.GetIPFullMask(mgmtPortIP)},
+// infrastructureExcludeCIDRs returns a list of IPs that should be excluded from IP allocation (gateway and management port IPs)
+func infrastructureExcludeCIDRs(netInfo util.NetInfo) []*net.IPNet {
+	var excludeCIDRs []*net.IPNet
+
+	for _, subnet := range netInfo.Subnets() {
+		gwIP := netInfo.GetNodeGatewayIP(subnet.CIDR).IP
+		mgmtPortIP := netInfo.GetNodeManagementIP(subnet.CIDR).IP
+		excludeCIDRs = append(excludeCIDRs,
+			&net.IPNet{IP: gwIP, Mask: util.GetIPFullMask(gwIP)},
+			&net.IPNet{IP: mgmtPortIP, Mask: util.GetIPFullMask(mgmtPortIP)},
+		)
 	}
+	return excludeCIDRs
 }

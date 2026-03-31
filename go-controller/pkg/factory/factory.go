@@ -58,39 +58,50 @@ import (
 	anpinformerfactory "sigs.k8s.io/network-policy-api/pkg/client/informers/externalversions"
 	anpinformer "sigs.k8s.io/network-policy-api/pkg/client/informers/externalversions/apis/v1alpha1"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	adminbasedpolicyapi "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1"
-	adminbasedpolicyscheme "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1/apis/clientset/versioned/scheme"
-	adminbasedpolicyinformerfactory "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1/apis/informers/externalversions"
-	adminpolicybasedrouteinformer "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1/apis/informers/externalversions/adminpolicybasedroute/v1"
-	egressfirewallapi "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1"
-	egressfirewallscheme "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/clientset/versioned/scheme"
-	egressfirewallinformerfactory "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/informers/externalversions"
-	egressfirewallinformer "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/informers/externalversions/egressfirewall/v1"
-	egressfirewalllister "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/listers/egressfirewall/v1"
-	egressipapi "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
-	egressipscheme "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/clientset/versioned/scheme"
-	egressipinformerfactory "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/informers/externalversions"
-	egressipinformer "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/informers/externalversions/egressip/v1"
-	egressiplister "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/listers/egressip/v1"
-	egressqosapi "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1"
-	egressqosscheme "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/clientset/versioned/scheme"
-	egressqosinformerfactory "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/informers/externalversions"
-	egressqosinformer "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/informers/externalversions/egressqos/v1"
-	egressserviceapi "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1"
-	egressservicescheme "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1/apis/clientset/versioned/scheme"
-	egressserviceinformerfactory "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1/apis/informers/externalversions"
-	egressserviceinformer "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1/apis/informers/externalversions/egressservice/v1"
-	routeadvertisementsapi "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/routeadvertisements/v1"
-	routeadvertisementsscheme "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/routeadvertisements/v1/apis/clientset/versioned/scheme"
-	routeadvertisementsinformerfactory "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/routeadvertisements/v1/apis/informers/externalversions"
-	routeadvertisementsinformer "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/routeadvertisements/v1/apis/informers/externalversions/routeadvertisements/v1"
-	userdefinednetworkapi "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1"
-	userdefinednetworkscheme "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1/apis/clientset/versioned/scheme"
-	userdefinednetworkapiinformerfactory "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1/apis/informers/externalversions"
-	userdefinednetworkinformer "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1/apis/informers/externalversions/userdefinednetwork/v1"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	adminbasedpolicyapi "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1"
+	adminbasedpolicyscheme "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1/apis/clientset/versioned/scheme"
+	adminbasedpolicyinformerfactory "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1/apis/informers/externalversions"
+	adminpolicybasedrouteinformer "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1/apis/informers/externalversions/adminpolicybasedroute/v1"
+	networkconnectapi "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1"
+	networkconnectscheme "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1/apis/clientset/versioned/scheme"
+	networkconnectinformerfactory "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1/apis/informers/externalversions"
+	networkconnectinformer "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1/apis/informers/externalversions/clusternetworkconnect/v1"
+	egressfirewallapi "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1"
+	egressfirewallscheme "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/clientset/versioned/scheme"
+	egressfirewallinformerfactory "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/informers/externalversions"
+	egressfirewallinformer "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/informers/externalversions/egressfirewall/v1"
+	egressfirewalllister "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/listers/egressfirewall/v1"
+	egressipapi "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
+	egressipscheme "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/clientset/versioned/scheme"
+	egressipinformerfactory "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/informers/externalversions"
+	egressipinformer "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/informers/externalversions/egressip/v1"
+	egressiplister "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/listers/egressip/v1"
+	egressqosapi "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1"
+	egressqosscheme "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/clientset/versioned/scheme"
+	egressqosinformerfactory "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/informers/externalversions"
+	egressqosinformer "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/informers/externalversions/egressqos/v1"
+	egressserviceapi "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1"
+	egressservicescheme "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1/apis/clientset/versioned/scheme"
+	egressserviceinformerfactory "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1/apis/informers/externalversions"
+	egressserviceinformer "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1/apis/informers/externalversions/egressservice/v1"
+	networkqosapi "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/networkqos/v1alpha1"
+	networkqosscheme "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/networkqos/v1alpha1/apis/clientset/versioned/scheme"
+	networkqosinformerfactory "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/networkqos/v1alpha1/apis/informers/externalversions"
+	networkqosinformer "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/networkqos/v1alpha1/apis/informers/externalversions/networkqos/v1alpha1"
+	networkqoslister "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/networkqos/v1alpha1/apis/listers/networkqos/v1alpha1"
+	routeadvertisementsapi "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/routeadvertisements/v1"
+	routeadvertisementsscheme "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/routeadvertisements/v1/apis/clientset/versioned/scheme"
+	routeadvertisementsinformerfactory "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/routeadvertisements/v1/apis/informers/externalversions"
+	routeadvertisementsinformer "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/routeadvertisements/v1/apis/informers/externalversions/routeadvertisements/v1"
+	userdefinednetworkapi "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1"
+	userdefinednetworkscheme "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1/apis/clientset/versioned/scheme"
+	userdefinednetworkapiinformerfactory "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1/apis/informers/externalversions"
+	userdefinednetworkinformer "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1/apis/informers/externalversions/userdefinednetwork/v1"
+	vtepinformerfactory "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/vtep/v1/apis/informers/externalversions"
+	vtepinformer "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/vtep/v1/apis/informers/externalversions/vtep/v1"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 type handlerCounter struct {
@@ -116,8 +127,11 @@ type WatchFactory struct {
 	ipamClaimsFactory    ipamclaimsfactory.SharedInformerFactory
 	nadFactory           nadinformerfactory.SharedInformerFactory
 	udnFactory           userdefinednetworkapiinformerfactory.SharedInformerFactory
+	cncFactory           networkconnectinformerfactory.SharedInformerFactory
 	raFactory            routeadvertisementsinformerfactory.SharedInformerFactory
 	frrFactory           frrinformerfactory.SharedInformerFactory
+	networkQoSFactory    networkqosinformerfactory.SharedInformerFactory
+	vtepFactory          vtepinformerfactory.SharedInformerFactory
 	informers            map[reflect.Type]*informer
 
 	stopChan chan struct{}
@@ -143,8 +157,11 @@ func (wf *WatchFactory) ShallowClone() *WatchFactory {
 		ipamClaimsFactory:    wf.ipamClaimsFactory,
 		nadFactory:           wf.nadFactory,
 		udnFactory:           wf.udnFactory,
+		cncFactory:           wf.cncFactory,
 		raFactory:            wf.raFactory,
 		frrFactory:           wf.frrFactory,
+		networkQoSFactory:    wf.networkQoSFactory,
+		vtepFactory:          wf.vtepFactory,
 		informers:            wf.informers,
 		stopChan:             wf.stopChan,
 
@@ -195,9 +212,7 @@ func SetEventQueueSize(newEventQueueSize uint32) {
 }
 
 // types for dynamic handlers created when adding a network policy
-type addressSetNamespaceAndPodSelector struct{}
 type peerNamespaceSelector struct{}
-type addressSetPodSelector struct{}
 type localPodSelector struct{}
 
 // types for handlers related to egress IP
@@ -214,32 +229,31 @@ type serviceForFakeNodePortWatcher struct{} // only for unit tests
 
 var (
 	// Resource types used in ovnk master
-	PodType                               reflect.Type = reflect.TypeOf(&corev1.Pod{})
-	ServiceType                           reflect.Type = reflect.TypeOf(&corev1.Service{})
-	EndpointSliceType                     reflect.Type = reflect.TypeOf(&discovery.EndpointSlice{})
-	PolicyType                            reflect.Type = reflect.TypeOf(&knet.NetworkPolicy{})
-	NamespaceType                         reflect.Type = reflect.TypeOf(&corev1.Namespace{})
-	NodeType                              reflect.Type = reflect.TypeOf(&corev1.Node{})
-	EgressFirewallType                    reflect.Type = reflect.TypeOf(&egressfirewallapi.EgressFirewall{})
-	EgressIPType                          reflect.Type = reflect.TypeOf(&egressipapi.EgressIP{})
-	EgressIPNamespaceType                 reflect.Type = reflect.TypeOf(&egressIPNamespace{})
-	EgressIPPodType                       reflect.Type = reflect.TypeOf(&egressIPPod{})
-	EgressNodeType                        reflect.Type = reflect.TypeOf(&egressNode{})
-	CloudPrivateIPConfigType              reflect.Type = reflect.TypeOf(&ocpcloudnetworkapi.CloudPrivateIPConfig{})
-	EgressQoSType                         reflect.Type = reflect.TypeOf(&egressqosapi.EgressQoS{})
-	EgressServiceType                     reflect.Type = reflect.TypeOf(&egressserviceapi.EgressService{})
-	AdminNetworkPolicyType                reflect.Type = reflect.TypeOf(&anpapi.AdminNetworkPolicy{})
-	BaselineAdminNetworkPolicyType        reflect.Type = reflect.TypeOf(&anpapi.BaselineAdminNetworkPolicy{})
-	AddressSetNamespaceAndPodSelectorType reflect.Type = reflect.TypeOf(&addressSetNamespaceAndPodSelector{})
-	PeerNamespaceSelectorType             reflect.Type = reflect.TypeOf(&peerNamespaceSelector{})
-	AddressSetPodSelectorType             reflect.Type = reflect.TypeOf(&addressSetPodSelector{})
-	LocalPodSelectorType                  reflect.Type = reflect.TypeOf(&localPodSelector{})
-	NetworkAttachmentDefinitionType       reflect.Type = reflect.TypeOf(&nadapi.NetworkAttachmentDefinition{})
-	MultiNetworkPolicyType                reflect.Type = reflect.TypeOf(&mnpapi.MultiNetworkPolicy{})
-	IPAMClaimsType                        reflect.Type = reflect.TypeOf(&ipamclaimsapi.IPAMClaim{})
-	UserDefinedNetworkType                reflect.Type = reflect.TypeOf(&userdefinednetworkapi.UserDefinedNetwork{})
-	ClusterUserDefinedNetworkType         reflect.Type = reflect.TypeOf(&userdefinednetworkapi.ClusterUserDefinedNetwork{})
-
+	PodType                         reflect.Type = reflect.TypeOf(&corev1.Pod{})
+	ServiceType                     reflect.Type = reflect.TypeOf(&corev1.Service{})
+	EndpointSliceType               reflect.Type = reflect.TypeOf(&discovery.EndpointSlice{})
+	PolicyType                      reflect.Type = reflect.TypeOf(&knet.NetworkPolicy{})
+	NamespaceType                   reflect.Type = reflect.TypeOf(&corev1.Namespace{})
+	NodeType                        reflect.Type = reflect.TypeOf(&corev1.Node{})
+	EgressFirewallType              reflect.Type = reflect.TypeOf(&egressfirewallapi.EgressFirewall{})
+	EgressIPType                    reflect.Type = reflect.TypeOf(&egressipapi.EgressIP{})
+	EgressIPNamespaceType           reflect.Type = reflect.TypeOf(&egressIPNamespace{})
+	EgressIPPodType                 reflect.Type = reflect.TypeOf(&egressIPPod{})
+	EgressNodeType                  reflect.Type = reflect.TypeOf(&egressNode{})
+	CloudPrivateIPConfigType        reflect.Type = reflect.TypeOf(&ocpcloudnetworkapi.CloudPrivateIPConfig{})
+	EgressQoSType                   reflect.Type = reflect.TypeOf(&egressqosapi.EgressQoS{})
+	EgressServiceType               reflect.Type = reflect.TypeOf(&egressserviceapi.EgressService{})
+	AdminNetworkPolicyType          reflect.Type = reflect.TypeOf(&anpapi.AdminNetworkPolicy{})
+	BaselineAdminNetworkPolicyType  reflect.Type = reflect.TypeOf(&anpapi.BaselineAdminNetworkPolicy{})
+	PeerNamespaceSelectorType       reflect.Type = reflect.TypeOf(&peerNamespaceSelector{})
+	LocalPodSelectorType            reflect.Type = reflect.TypeOf(&localPodSelector{})
+	NetworkAttachmentDefinitionType reflect.Type = reflect.TypeOf(&nadapi.NetworkAttachmentDefinition{})
+	MultiNetworkPolicyType          reflect.Type = reflect.TypeOf(&mnpapi.MultiNetworkPolicy{})
+	IPAMClaimsType                  reflect.Type = reflect.TypeOf(&ipamclaimsapi.IPAMClaim{})
+	UserDefinedNetworkType          reflect.Type = reflect.TypeOf(&userdefinednetworkapi.UserDefinedNetwork{})
+	ClusterUserDefinedNetworkType   reflect.Type = reflect.TypeOf(&userdefinednetworkapi.ClusterUserDefinedNetwork{})
+	NetworkQoSType                  reflect.Type = reflect.TypeOf(&networkqosapi.NetworkQoS{})
+	ClusterNetworkConnectType       reflect.Type = reflect.TypeOf(&networkconnectapi.ClusterNetworkConnect{})
 	// Resource types used in ovnk node
 	NamespaceExGwType                         reflect.Type = reflect.TypeOf(&namespaceExGw{})
 	EndpointSliceForStaleConntrackRemovalType reflect.Type = reflect.TypeOf(&endpointSliceForStaleConntrackRemoval{})
@@ -267,6 +281,20 @@ func NewMasterWatchFactory(ovnClientset *util.OVNMasterClientset) (*WatchFactory
 		}
 	}
 
+	// Initialize VTEP factory for EVPN support in combined mode (cluster-manager + ovnkube-controller).
+	if util.IsEVPNEnabled() {
+		wf.vtepFactory = vtepinformerfactory.NewSharedInformerFactory(ovnClientset.VTEPClient, resyncInterval)
+		// make sure shared informer is created for a factory, so on wf.vtepFactory.Start() it is initialized and caches are synced.
+		wf.vtepFactory.K8s().V1().VTEPs().Informer()
+	}
+
+	// Initialize FRR factory for Route Advertisement support in combined mode (cluster-manager + ovnkube-controller).
+	if util.IsRouteAdvertisementsEnabled() {
+		wf.frrFactory = frrinformerfactory.NewSharedInformerFactory(ovnClientset.FRRClient, resyncInterval)
+		// make sure shared informer is created for a factory, so on wf.frrFactory.Start() it is initialized and caches are synced.
+		wf.frrFactory.Api().V1beta1().FRRConfigurations().Informer()
+	}
+
 	return wf, nil
 }
 
@@ -276,12 +304,42 @@ func informerObjectTrim(obj interface{}) (interface{}, error) {
 		accessor.SetManagedFields(nil)
 	}
 	if pod, ok := obj.(*corev1.Pod); ok {
+		// OVN-K does not consume pod volumes from informer cache.
 		pod.Spec.Volumes = []corev1.Volume{}
+		// Scheduling-only pod fields are not read from the informer cache.
+		pod.Spec.Tolerations = nil
+		pod.Spec.Affinity = nil
+		pod.Spec.NodeSelector = nil
+		pod.OwnerReferences = nil
+		// OVN-K only walks pod containers for named ports, so trim the per-container
+		// runtime and resource payload that is not read from the informer cache.
 		for i := range pod.Spec.Containers {
 			pod.Spec.Containers[i].Command = nil
 			pod.Spec.Containers[i].Args = nil
 			pod.Spec.Containers[i].Env = nil
+			pod.Spec.Containers[i].EnvFrom = nil
 			pod.Spec.Containers[i].VolumeMounts = nil
+			pod.Spec.Containers[i].Resources = corev1.ResourceRequirements{}
+			pod.Spec.Containers[i].LivenessProbe = nil
+			pod.Spec.Containers[i].ReadinessProbe = nil
+			pod.Spec.Containers[i].StartupProbe = nil
+			pod.Spec.Containers[i].Lifecycle = nil
+			pod.Spec.Containers[i].SecurityContext = nil
+		}
+		// Init and ephemeral containers are not read from the informer cache.
+		pod.Spec.InitContainers = nil
+		pod.Spec.EphemeralContainers = nil
+		// OVN-K only needs pod phase/IPs/host IP and a small subset of conditions.
+		// Container status arrays are retained heavily in heap profiles and are not read.
+		pod.Status.ContainerStatuses = nil
+		pod.Status.InitContainerStatuses = nil
+		pod.Status.EphemeralContainerStatuses = nil
+		// Current informer consumers only read condition type/status/transition time.
+		for i := range pod.Status.Conditions {
+			pod.Status.Conditions[i].LastProbeTime = metav1.Time{}
+			pod.Status.Conditions[i].Reason = ""
+			pod.Status.Conditions[i].Message = ""
+			pod.Status.Conditions[i].ObservedGeneration = 0
 		}
 	}
 	return obj, nil
@@ -306,6 +364,7 @@ func NewOVNKubeControllerWatchFactory(ovnClientset *util.OVNKubeControllerClient
 		mnpFactory:           mnpinformerfactory.NewSharedInformerFactory(ovnClientset.MultiNetworkPolicyClient, resyncInterval),
 		egressServiceFactory: egressserviceinformerfactory.NewSharedInformerFactory(ovnClientset.EgressServiceClient, resyncInterval),
 		apbRouteFactory:      adminbasedpolicyinformerfactory.NewSharedInformerFactory(ovnClientset.AdminPolicyRouteClient, resyncInterval),
+		networkQoSFactory:    networkqosinformerfactory.NewSharedInformerFactory(ovnClientset.NetworkQoSClient, resyncInterval),
 		informers:            make(map[reflect.Type]*informer),
 		stopChan:             make(chan struct{}),
 	}
@@ -348,6 +407,14 @@ func NewOVNKubeControllerWatchFactory(ovnClientset *util.OVNKubeControllerClient
 		return nil, err
 	}
 	if err := userdefinednetworkapi.AddToScheme(userdefinednetworkscheme.Scheme); err != nil {
+		return nil, err
+	}
+
+	if err := networkqosapi.AddToScheme(networkqosscheme.Scheme); err != nil {
+		return nil, err
+	}
+
+	if err := networkconnectapi.AddToScheme(networkconnectscheme.Scheme); err != nil {
 		return nil, err
 	}
 
@@ -501,140 +568,149 @@ func NewOVNKubeControllerWatchFactory(ovnClientset *util.OVNKubeControllerClient
 		wf.raFactory.K8s().V1().RouteAdvertisements().Informer()
 	}
 
+	if config.OVNKubernetesFeature.EnableNetworkQoS {
+		wf.informers[NetworkQoSType], err = newQueuedInformer(eventQueueSize, NetworkQoSType,
+			wf.networkQoSFactory.K8s().V1alpha1().NetworkQoSes().Informer(), wf.stopChan, minNumEventQueues)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if util.IsNetworkConnectEnabled() {
+		wf.cncFactory = networkconnectinformerfactory.NewSharedInformerFactory(ovnClientset.NetworkConnectClient, resyncInterval)
+		wf.informers[ClusterNetworkConnectType], err = newQueuedInformer(eventQueueSize,
+			ClusterNetworkConnectType,
+			wf.cncFactory.K8s().V1().ClusterNetworkConnects().Informer(), wf.stopChan, minNumEventQueues)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return wf, nil
 }
 
 // Start starts the factory and begins processing events
 func (wf *WatchFactory) Start() error {
+	start := time.Now()
 	klog.Info("Starting watch factory")
 	wf.iFactory.Start(wf.stopChan)
-	for oType, synced := range waitForCacheSyncWithTimeout(wf.iFactory, wf.stopChan) {
-		if !synced {
-			return fmt.Errorf("error in syncing cache for %v informer", oType)
-		}
+	if err := waitForCacheSyncWithTimeout(wf.iFactory, wf.stopChan); err != nil {
+		return err
 	}
 	if config.OVNKubernetesFeature.EnableAdminNetworkPolicy && wf.anpFactory != nil {
 		wf.anpFactory.Start(wf.stopChan)
-		for oType, synced := range waitForCacheSyncWithTimeout(wf.anpFactory, wf.stopChan) {
-			if !synced {
-				return fmt.Errorf("error in syncing cache for %v informer", oType)
-			}
+		if err := waitForCacheSyncWithTimeout(wf.anpFactory, wf.stopChan); err != nil {
+			return err
 		}
 	}
 	if config.OVNKubernetesFeature.EnableEgressIP && wf.eipFactory != nil {
 		wf.eipFactory.Start(wf.stopChan)
-		for oType, synced := range waitForCacheSyncWithTimeout(wf.eipFactory, wf.stopChan) {
-			if !synced {
-				return fmt.Errorf("error in syncing cache for %v informer", oType)
-			}
+		if err := waitForCacheSyncWithTimeout(wf.eipFactory, wf.stopChan); err != nil {
+			return err
 		}
 	}
 	if config.OVNKubernetesFeature.EnableEgressFirewall && wf.efFactory != nil {
 		wf.efFactory.Start(wf.stopChan)
-		for oType, synced := range waitForCacheSyncWithTimeout(wf.efFactory, wf.stopChan) {
-			if !synced {
-				return fmt.Errorf("error in syncing cache for %v informer", oType)
-			}
+		if err := waitForCacheSyncWithTimeout(wf.efFactory, wf.stopChan); err != nil {
+			return err
 		}
 
 		if config.OVNKubernetesFeature.EnableDNSNameResolver && wf.dnsFactory != nil {
 			wf.dnsFactory.Start(wf.stopChan)
-			for oType, synced := range waitForCacheSyncWithTimeout(wf.dnsFactory, wf.stopChan) {
-				if !synced {
-					return fmt.Errorf("error in syncing cache for %v informer", oType)
-				}
+			if err := waitForCacheSyncWithTimeout(wf.dnsFactory, wf.stopChan); err != nil {
+				return err
 			}
 		}
 	}
 	if util.PlatformTypeIsEgressIPCloudProvider() && wf.cpipcFactory != nil {
 		wf.cpipcFactory.Start(wf.stopChan)
-		for oType, synced := range waitForCacheSyncWithTimeout(wf.cpipcFactory, wf.stopChan) {
-			if !synced {
-				return fmt.Errorf("error in syncing cache for %v informer", oType)
-			}
+		if err := waitForCacheSyncWithTimeout(wf.cpipcFactory, wf.stopChan); err != nil {
+			return err
 		}
 	}
 	if config.OVNKubernetesFeature.EnableEgressQoS && wf.egressQoSFactory != nil {
 		wf.egressQoSFactory.Start(wf.stopChan)
-		for oType, synced := range waitForCacheSyncWithTimeout(wf.egressQoSFactory, wf.stopChan) {
-			if !synced {
-				return fmt.Errorf("error in syncing cache for %v informer", oType)
-			}
+		if err := waitForCacheSyncWithTimeout(wf.egressQoSFactory, wf.stopChan); err != nil {
+			return err
 		}
 	}
 
 	if util.IsMultiNetworkPoliciesSupportEnabled() && wf.mnpFactory != nil {
 		wf.mnpFactory.Start(wf.stopChan)
-		for oType, synced := range waitForCacheSyncWithTimeout(wf.mnpFactory, wf.stopChan) {
-			if !synced {
-				return fmt.Errorf("error in syncing cache for %v informer", oType)
-			}
+		if err := waitForCacheSyncWithTimeout(wf.mnpFactory, wf.stopChan); err != nil {
+			return err
 		}
 	}
 
 	if config.OVNKubernetesFeature.EnableEgressService && wf.egressServiceFactory != nil {
 		wf.egressServiceFactory.Start(wf.stopChan)
-		for oType, synced := range waitForCacheSyncWithTimeout(wf.egressServiceFactory, wf.stopChan) {
-			if !synced {
-				return fmt.Errorf("error in syncing cache for %v informer", oType)
-			}
+		if err := waitForCacheSyncWithTimeout(wf.egressServiceFactory, wf.stopChan); err != nil {
+			return err
 		}
 	}
 
 	if config.OVNKubernetesFeature.EnableMultiExternalGateway && wf.apbRouteFactory != nil {
 		wf.apbRouteFactory.Start(wf.stopChan)
-		for oType, synced := range waitForCacheSyncWithTimeout(wf.apbRouteFactory, wf.stopChan) {
-			if !synced {
-				return fmt.Errorf("error in syncing cache for %v informer", oType)
-			}
+		if err := waitForCacheSyncWithTimeout(wf.apbRouteFactory, wf.stopChan); err != nil {
+			return err
 		}
 	}
 
 	if wf.ipamClaimsFactory != nil {
 		wf.ipamClaimsFactory.Start(wf.stopChan)
-		for oType, synced := range waitForCacheSyncWithTimeout(wf.ipamClaimsFactory, wf.stopChan) {
-			if !synced {
-				return fmt.Errorf("error in syncing cache for %v informer", oType)
-			}
+		if err := waitForCacheSyncWithTimeout(wf.ipamClaimsFactory, wf.stopChan); err != nil {
+			return err
 		}
 	}
 
 	if wf.nadFactory != nil {
 		wf.nadFactory.Start(wf.stopChan)
-		for oType, synced := range waitForCacheSyncWithTimeout(wf.nadFactory, wf.stopChan) {
-			if !synced {
-				return fmt.Errorf("error in syncing cache for %v informer", oType)
-			}
+		if err := waitForCacheSyncWithTimeout(wf.nadFactory, wf.stopChan); err != nil {
+			return err
+		}
+	}
+
+	if config.OVNKubernetesFeature.EnableNetworkQoS && wf.networkQoSFactory != nil {
+		wf.networkQoSFactory.Start(wf.stopChan)
+		if err := waitForCacheSyncWithTimeout(wf.networkQoSFactory, wf.stopChan); err != nil {
+			return err
 		}
 	}
 
 	if util.IsNetworkSegmentationSupportEnabled() && wf.udnFactory != nil {
 		wf.udnFactory.Start(wf.stopChan)
-		for oType, synced := range waitForCacheSyncWithTimeout(wf.udnFactory, wf.stopChan) {
-			if !synced {
-				return fmt.Errorf("error in syncing cache for %v informer", oType)
-			}
+		if err := waitForCacheSyncWithTimeout(wf.udnFactory, wf.stopChan); err != nil {
+			return err
+		}
+	}
+
+	if wf.cncFactory != nil {
+		wf.cncFactory.Start(wf.stopChan)
+		if err := waitForCacheSyncWithTimeout(wf.cncFactory, wf.stopChan); err != nil {
+			return err
+		}
+	}
+
+	if wf.vtepFactory != nil {
+		wf.vtepFactory.Start(wf.stopChan)
+		if err := waitForCacheSyncWithTimeout(wf.vtepFactory, wf.stopChan); err != nil {
+			return err
 		}
 	}
 
 	if wf.raFactory != nil {
 		wf.raFactory.Start(wf.stopChan)
-		for oType, synced := range waitForCacheSyncWithTimeout(wf.raFactory, wf.stopChan) {
-			if !synced {
-				return fmt.Errorf("error in syncing cache for %v informer", oType)
-			}
+		if err := waitForCacheSyncWithTimeout(wf.raFactory, wf.stopChan); err != nil {
+			return err
 		}
 	}
 
 	if wf.frrFactory != nil {
 		wf.frrFactory.Start(wf.stopChan)
-		for oType, synced := range waitForCacheSyncWithTimeout(wf.frrFactory, wf.stopChan) {
-			if !synced {
-				return fmt.Errorf("error in syncing cache for %v informer", oType)
-			}
+		if err := waitForCacheSyncWithTimeout(wf.frrFactory, wf.stopChan); err != nil {
+			return err
 		}
 	}
-
+	klog.Infof("Watch Factory start up complete, took: %s", time.Since(start))
 	return nil
 }
 
@@ -677,11 +753,24 @@ func (wf *WatchFactory) Stop() {
 		wf.udnFactory.Shutdown()
 	}
 
+	if wf.cncFactory != nil {
+		wf.cncFactory.Shutdown()
+	}
+
+	if wf.vtepFactory != nil {
+		wf.vtepFactory.Shutdown()
+	}
+
 	if wf.raFactory != nil {
 		wf.raFactory.Shutdown()
 	}
+
 	if wf.frrFactory != nil {
 		wf.frrFactory.Shutdown()
+	}
+
+	if wf.networkQoSFactory != nil {
+		wf.networkQoSFactory.Shutdown()
 	}
 }
 
@@ -869,6 +958,7 @@ func NewClusterManagerWatchFactory(ovnClientset *util.OVNClusterManagerClientset
 		dnsFactory:           ocpnetworkinformerfactory.NewSharedInformerFactoryWithOptions(ovnClientset.OCPNetworkClient, resyncInterval, ocpnetworkinformerfactory.WithNamespace(config.Kubernetes.OVNConfigNamespace)),
 		apbRouteFactory:      adminbasedpolicyinformerfactory.NewSharedInformerFactory(ovnClientset.AdminPolicyRouteClient, resyncInterval),
 		egressQoSFactory:     egressqosinformerfactory.NewSharedInformerFactory(ovnClientset.EgressQoSClient, resyncInterval),
+		networkQoSFactory:    networkqosinformerfactory.NewSharedInformerFactory(ovnClientset.NetworkQoSClient, resyncInterval),
 		informers:            make(map[reflect.Type]*informer),
 		stopChan:             make(chan struct{}),
 	}
@@ -893,6 +983,9 @@ func NewClusterManagerWatchFactory(ovnClientset *util.OVNClusterManagerClientset
 		return nil, err
 	}
 	if err := userdefinednetworkapi.AddToScheme(userdefinednetworkscheme.Scheme); err != nil {
+		return nil, err
+	}
+	if err := networkconnectapi.AddToScheme(networkconnectscheme.Scheme); err != nil {
 		return nil, err
 	}
 	if err := routeadvertisementsapi.AddToScheme(routeadvertisementsscheme.Scheme); err != nil {
@@ -1043,7 +1136,33 @@ func NewClusterManagerWatchFactory(ovnClientset *util.OVNClusterManagerClientset
 		wf.iFactory.Core().V1().Pods().Informer()
 	}
 
+	// Initialize VTEP factory for EVPN support.
+	if util.IsEVPNEnabled() {
+		wf.vtepFactory = vtepinformerfactory.NewSharedInformerFactory(ovnClientset.VTEPClient, resyncInterval)
+		// make sure shared informer is created for a factory, so on wf.vtepFactory.Start() it is initialized and caches are synced.
+		wf.vtepFactory.K8s().V1().VTEPs().Informer()
+	}
+
+	if util.IsNetworkConnectEnabled() {
+		wf.cncFactory = networkconnectinformerfactory.NewSharedInformerFactory(ovnClientset.NetworkConnectClient, resyncInterval)
+		wf.informers[ClusterNetworkConnectType], err = newQueuedInformer(eventQueueSize,
+			ClusterNetworkConnectType,
+			wf.cncFactory.K8s().V1().ClusterNetworkConnects().Informer(),
+			wf.stopChan, minNumEventQueues)
+		if err != nil {
+			return nil, err
+		}
+		// make sure namespace informer cache is initialized and synced on Start().
+		wf.iFactory.Core().V1().Namespaces().Informer()
+	}
+
 	if util.IsRouteAdvertisementsEnabled() {
+		wf.informers[NamespaceType], err = newQueuedInformer(eventQueueSize, NamespaceType, wf.iFactory.Core().V1().Namespaces().Informer(),
+			wf.stopChan, defaultNumEventQueues)
+		if err != nil {
+			return nil, err
+		}
+
 		wf.raFactory = routeadvertisementsinformerfactory.NewSharedInformerFactory(ovnClientset.RouteAdvertisementsClient, resyncInterval)
 		// make sure shared informer is created for a factory, so on wf.raFactory.Start() it is initialized and caches are synced.
 		wf.raFactory.K8s().V1().RouteAdvertisements().Informer()
@@ -1141,6 +1260,14 @@ func getObjectMeta(objType reflect.Type, obj interface{}) (*metav1.ObjectMeta, e
 		if cudn, ok := obj.(*userdefinednetworkapi.ClusterUserDefinedNetwork); ok {
 			return &cudn.ObjectMeta, nil
 		}
+	case ClusterNetworkConnectType:
+		if cnc, ok := obj.(*networkconnectapi.ClusterNetworkConnect); ok {
+			return &cnc.ObjectMeta, nil
+		}
+	case NetworkQoSType:
+		if networkQoS, ok := obj.(*networkqosapi.NetworkQoS); ok {
+			return &networkQoS.ObjectMeta, nil
+		}
 	}
 
 	return nil, fmt.Errorf("cannot get ObjectMeta from type %v", objType)
@@ -1151,26 +1278,22 @@ type AddHandlerFuncType func(namespace string, sel labels.Selector, funcs cache.
 // GetHandlerPriority returns the priority of each objType's handler
 // Priority of the handler is what determine which handler would get an event first
 // This is relevant only for handlers that are sharing the same resources:
-// Pods: shared by PodType (0), EgressIPPodType (1), AddressSetPodSelectorType (2), LocalPodSelectorType (3)
-// Namespaces: shared by NamespaceType (0), EgressIPNamespaceType (1), PeerNamespaceSelectorType (3), AddressSetNamespaceAndPodSelectorType (4)
+// Pods: shared by PodType (0), EgressIPPodType (1), LocalPodSelectorType (3)
+// Namespaces: shared by NamespaceType (0), EgressIPNamespaceType (1), PeerNamespaceSelectorType (2)
 // Nodes: shared by NodeType (0), EgressNodeType (1)
 // By default handlers get the defaultHandlerPriority which is 0 (highest priority). Higher the number, lower the priority to get an event.
-// Example: EgressIPPodType will always get the pod event after PodType and AddressSetPodSelectorType will always get the event after PodType and EgressIPPodType
+// Example: EgressIPPodType will always get the pod event after PodType
 // NOTE: If you are touching this function to add a new object type that uses shared objects, please make sure to update `minHandlerPriority` if needed
 func (wf *WatchFactory) GetHandlerPriority(objType reflect.Type) (priority int) {
 	switch objType {
 	case EgressIPPodType:
 		return 1
-	case AddressSetPodSelectorType:
-		return 2
 	case LocalPodSelectorType:
 		return 3
 	case EgressIPNamespaceType:
 		return 1
 	case PeerNamespaceSelectorType:
 		return 2
-	case AddressSetNamespaceAndPodSelectorType:
-		return 3
 	case EgressNodeType:
 		return 1
 	default:
@@ -1206,12 +1329,12 @@ func (wf *WatchFactory) GetResourceHandlerFunc(objType reflect.Type) (AddHandler
 			return wf.AddFilteredServiceHandler(namespace, funcs, processExisting)
 		}, nil
 
-	case AddressSetPodSelectorType, LocalPodSelectorType, PodType, EgressIPPodType:
+	case LocalPodSelectorType, PodType, EgressIPPodType:
 		return func(namespace string, sel labels.Selector, funcs cache.ResourceEventHandler, processExisting func([]interface{}) error) (*Handler, error) {
 			return wf.AddFilteredPodHandler(namespace, sel, funcs, processExisting, priority)
 		}, nil
 
-	case AddressSetNamespaceAndPodSelectorType, PeerNamespaceSelectorType, EgressIPNamespaceType:
+	case PeerNamespaceSelectorType, EgressIPNamespaceType:
 		return func(namespace string, sel labels.Selector, funcs cache.ResourceEventHandler, processExisting func([]interface{}) error) (*Handler, error) {
 			return wf.AddFilteredNamespaceHandler(namespace, sel, funcs, processExisting, priority)
 		}, nil
@@ -1405,6 +1528,11 @@ func (wf *WatchFactory) RemoveAdminNetworkPolicyHandler(handler *Handler) {
 // used only in unit tests
 func (wf *WatchFactory) RemoveBaselineAdminNetworkPolicyHandler(handler *Handler) {
 	wf.removeHandler(BaselineAdminNetworkPolicyType, handler)
+}
+
+// RemoveNetworkQoSHandler removes an NetworkQoS object event handler function
+func (wf *WatchFactory) RemoveNetworkQoSHandler(handler *Handler) {
+	wf.removeHandler(NetworkQoSType, handler)
 }
 
 // AddNetworkAttachmentDefinitionHandler adds a handler function that will be executed on NetworkAttachmentDefinition object changes
@@ -1630,6 +1758,11 @@ func (wf *WatchFactory) GetEgressFirewall(namespace, name string) (*egressfirewa
 	return egressFirewallLister.EgressFirewalls(namespace).Get(name)
 }
 
+func (wf *WatchFactory) GetNetworkQoSes() ([]*networkqosapi.NetworkQoS, error) {
+	networkQosLister := wf.informers[NetworkQoSType].lister.(networkqoslister.NetworkQoSLister)
+	return networkQosLister.List(labels.Everything())
+}
+
 func (wf *WatchFactory) CertificateSigningRequestInformer() certificatesinformers.CertificateSigningRequestInformer {
 	return wf.iFactory.Certificates().V1().CertificateSigningRequests()
 }
@@ -1742,6 +1875,14 @@ func (wf *WatchFactory) ClusterUserDefinedNetworkInformer() userdefinednetworkin
 	return wf.udnFactory.K8s().V1().ClusterUserDefinedNetworks()
 }
 
+func (wf *WatchFactory) ClusterNetworkConnectInformer() networkconnectinformer.ClusterNetworkConnectInformer {
+	return wf.cncFactory.K8s().V1().ClusterNetworkConnects()
+}
+
+func (wf *WatchFactory) VTEPInformer() vtepinformer.VTEPInformer {
+	return wf.vtepFactory.K8s().V1().VTEPs()
+}
+
 func (wf *WatchFactory) DNSNameResolverInformer() ocpnetworkinformerv1alpha1.DNSNameResolverInformer {
 	return wf.dnsFactory.Network().V1alpha1().DNSNameResolvers()
 }
@@ -1752,6 +1893,10 @@ func (wf *WatchFactory) RouteAdvertisementsInformer() routeadvertisementsinforme
 
 func (wf *WatchFactory) FRRConfigurationsInformer() frrinformer.FRRConfigurationInformer {
 	return wf.frrFactory.Api().V1beta1().FRRConfigurations()
+}
+
+func (wf *WatchFactory) NetworkQoSInformer() networkqosinformer.NetworkQoSInformer {
+	return wf.networkQoSFactory.K8s().V1alpha1().NetworkQoSes()
 }
 
 // withServiceNameAndNoHeadlessServiceSelector returns a LabelSelector (added to the
@@ -1850,10 +1995,18 @@ type waitForCacheSyncer interface {
 	WaitForCacheSync(stopCh <-chan struct{}) map[reflect.Type]bool
 }
 
-func waitForCacheSyncWithTimeout(factory waitForCacheSyncer, stopCh <-chan struct{}) map[reflect.Type]bool {
-	// Give some small time for sync. It helps significantly reduce unit tests time
+func waitForCacheSyncWithTimeout(factory waitForCacheSyncer, stopCh <-chan struct{}) error {
+	// Give some small amount of time for sync. It helps significantly reduce unit tests time.
 	time.Sleep(5 * time.Millisecond)
-	return factory.WaitForCacheSync(util.GetChildStopChanWithTimeout(stopCh, types.InformerSyncTimeout))
+
+	for oType, synced := range factory.WaitForCacheSync(util.GetChildStopChanWithTimeout(stopCh, types.InformerSyncTimeout)) {
+		if !synced {
+			return fmt.Errorf("error in syncing cache for %v informer", oType)
+		} else {
+			klog.Infof("%s informer cache synced successfully", oType)
+		}
+	}
+	return nil
 }
 
 // getEndpointSliceSelector returns an EndpointSlice selector function used in watchers.

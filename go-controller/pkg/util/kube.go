@@ -44,14 +44,17 @@ import (
 	utilnet "k8s.io/utils/net"
 	anpclientset "sigs.k8s.io/network-policy-api/pkg/client/clientset/versioned"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	adminpolicybasedrouteclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1/apis/clientset/versioned"
-	egressfirewallclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/clientset/versioned"
-	egressipclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/clientset/versioned"
-	egressqosclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/clientset/versioned"
-	egressserviceclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1/apis/clientset/versioned"
-	routeadvertisementsclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/routeadvertisements/v1/apis/clientset/versioned"
-	userdefinednetworkclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1/apis/clientset/versioned"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	adminpolicybasedrouteclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1/apis/clientset/versioned"
+	networkconnectclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1/apis/clientset/versioned"
+	egressfirewallclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/clientset/versioned"
+	egressipclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/clientset/versioned"
+	egressqosclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/clientset/versioned"
+	egressserviceclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1/apis/clientset/versioned"
+	networkqosclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/networkqos/v1alpha1/apis/clientset/versioned"
+	routeadvertisementsclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/routeadvertisements/v1/apis/clientset/versioned"
+	userdefinednetworkclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1/apis/clientset/versioned"
+	vtepclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/vtep/v1/apis/clientset/versioned"
 )
 
 // OVNClientset is a wrapper around all clientsets used by OVN-Kubernetes
@@ -69,8 +72,11 @@ type OVNClientset struct {
 	AdminPolicyRouteClient    adminpolicybasedrouteclientset.Interface
 	IPAMClaimsClient          ipamclaimssclientset.Interface
 	UserDefinedNetworkClient  userdefinednetworkclientset.Interface
+	NetworkConnectClient      networkconnectclientset.Interface
 	RouteAdvertisementsClient routeadvertisementsclientset.Interface
 	FRRClient                 frrclientset.Interface
+	NetworkQoSClient          networkqosclientset.Interface
+	VTEPClient                vtepclientset.Interface
 }
 
 // OVNMasterClientset
@@ -90,6 +96,8 @@ type OVNMasterClientset struct {
 	UserDefinedNetworkClient  userdefinednetworkclientset.Interface
 	RouteAdvertisementsClient routeadvertisementsclientset.Interface
 	FRRClient                 frrclientset.Interface
+	NetworkQoSClient          networkqosclientset.Interface
+	VTEPClient                vtepclientset.Interface
 }
 
 // OVNKubeControllerClientset
@@ -107,6 +115,8 @@ type OVNKubeControllerClientset struct {
 	NetworkAttchDefClient     networkattchmentdefclientset.Interface
 	UserDefinedNetworkClient  userdefinednetworkclientset.Interface
 	RouteAdvertisementsClient routeadvertisementsclientset.Interface
+	NetworkQoSClient          networkqosclientset.Interface
+	NetworkConnectClient      networkconnectclientset.Interface
 }
 
 type OVNNodeClientset struct {
@@ -132,8 +142,11 @@ type OVNClusterManagerClientset struct {
 	IPAMClaimsClient          ipamclaimssclientset.Interface
 	OCPNetworkClient          ocpnetworkclientset.Interface
 	UserDefinedNetworkClient  userdefinednetworkclientset.Interface
+	NetworkConnectClient      networkconnectclientset.Interface
 	RouteAdvertisementsClient routeadvertisementsclientset.Interface
 	FRRClient                 frrclientset.Interface
+	NetworkQoSClient          networkqosclientset.Interface
+	VTEPClient                vtepclientset.Interface
 }
 
 const (
@@ -163,6 +176,8 @@ func (cs *OVNClientset) GetMasterClientset() *OVNMasterClientset {
 		UserDefinedNetworkClient:  cs.UserDefinedNetworkClient,
 		RouteAdvertisementsClient: cs.RouteAdvertisementsClient,
 		FRRClient:                 cs.FRRClient,
+		NetworkQoSClient:          cs.NetworkQoSClient,
+		VTEPClient:                cs.VTEPClient,
 	}
 }
 
@@ -181,6 +196,7 @@ func (cs *OVNMasterClientset) GetOVNKubeControllerClientset() *OVNKubeController
 		NetworkAttchDefClient:     cs.NetworkAttchDefClient,
 		UserDefinedNetworkClient:  cs.UserDefinedNetworkClient,
 		RouteAdvertisementsClient: cs.RouteAdvertisementsClient,
+		NetworkQoSClient:          cs.NetworkQoSClient,
 	}
 }
 
@@ -199,6 +215,8 @@ func (cs *OVNClientset) GetOVNKubeControllerClientset() *OVNKubeControllerClient
 		NetworkAttchDefClient:     cs.NetworkAttchDefClient,
 		UserDefinedNetworkClient:  cs.UserDefinedNetworkClient,
 		RouteAdvertisementsClient: cs.RouteAdvertisementsClient,
+		NetworkQoSClient:          cs.NetworkQoSClient,
+		NetworkConnectClient:      cs.NetworkConnectClient,
 	}
 }
 
@@ -216,8 +234,11 @@ func (cs *OVNClientset) GetClusterManagerClientset() *OVNClusterManagerClientset
 		IPAMClaimsClient:          cs.IPAMClaimsClient,
 		OCPNetworkClient:          cs.OCPNetworkClient,
 		UserDefinedNetworkClient:  cs.UserDefinedNetworkClient,
+		NetworkConnectClient:      cs.NetworkConnectClient,
 		RouteAdvertisementsClient: cs.RouteAdvertisementsClient,
 		FRRClient:                 cs.FRRClient,
+		NetworkQoSClient:          cs.NetworkQoSClient,
+		VTEPClient:                cs.VTEPClient,
 	}
 }
 
@@ -512,12 +533,27 @@ func NewOVNClientset(conf *config.KubernetesConfig) (*OVNClientset, error) {
 		return nil, err
 	}
 
+	networkConnectClientset, err := networkconnectclientset.NewForConfig(kconfig)
+	if err != nil {
+		return nil, err
+	}
+
 	routeAdvertisementsClientset, err := routeadvertisementsclientset.NewForConfig(kconfig)
 	if err != nil {
 		return nil, err
 	}
 
 	frrClientset, err := frrclientset.NewForConfig(kconfig)
+	if err != nil {
+		return nil, err
+	}
+
+	networkqosClientset, err := networkqosclientset.NewForConfig(kconfig)
+	if err != nil {
+		return nil, err
+	}
+
+	vtepClientset, err := vtepclientset.NewForConfig(kconfig)
 	if err != nil {
 		return nil, err
 	}
@@ -536,8 +572,11 @@ func NewOVNClientset(conf *config.KubernetesConfig) (*OVNClientset, error) {
 		AdminPolicyRouteClient:    adminPolicyBasedRouteClientset,
 		IPAMClaimsClient:          ipamClaimsClientset,
 		UserDefinedNetworkClient:  userDefinedNetworkClientSet,
+		NetworkConnectClient:      networkConnectClientset,
 		RouteAdvertisementsClient: routeAdvertisementsClientset,
 		FRRClient:                 frrClientset,
+		NetworkQoSClient:          networkqosClientset,
+		VTEPClient:                vtepClientset,
 	}, nil
 }
 
@@ -852,13 +891,6 @@ func GetEligibleEndpointAddressesFromSlices(endpointSlices []*discovery.Endpoint
 	return getEligibleEndpointAddresses(getEndpointsFromEndpointSlices(endpointSlices), service, "")
 }
 
-// GetLocalEligibleEndpointAddressesFromSlices returns a set of IP addresses of endpoints that are local to the specified node
-// and are eligible.
-func GetLocalEligibleEndpointAddressesFromSlices(endpointSlices []*discovery.EndpointSlice, service *corev1.Service, nodeName string) sets.Set[string] {
-	endpoints := getEligibleEndpointAddresses(getEndpointsFromEndpointSlices(endpointSlices), service, nodeName)
-	return sets.New(endpoints...)
-}
-
 // DoesEndpointSliceContainEndpoint returns true if the endpointslice
 // contains an endpoint with the given IP, port and Protocol and if this endpoint is considered eligible.
 func DoesEndpointSliceContainEligibleEndpoint(endpointSlice *discovery.EndpointSlice,
@@ -878,7 +910,8 @@ func DoesEndpointSliceContainEligibleEndpoint(endpointSlice *discovery.EndpointS
 
 // HasLocalHostNetworkEndpoints returns true if any of the nodeAddresses appear in given the set of
 // localEndpointAddresses. This is useful to check whether any of the provided local endpoints are host-networked.
-func HasLocalHostNetworkEndpoints(localEndpointAddresses sets.Set[string], nodeAddresses []net.IP) bool {
+func HasLocalHostNetworkEndpoints(portToLBEndpoints PortToLBEndpoints, nodeAddresses []net.IP) bool {
+	localEndpointAddresses := portToLBEndpoints.GetAddresses()
 	if len(localEndpointAddresses) == 0 || len(nodeAddresses) == 0 {
 		return false
 	}
@@ -901,17 +934,6 @@ func ServiceNamespacedNameFromEndpointSlice(endpointSlice *discovery.EndpointSli
 				endpointSlice.Namespace, endpointSlice.Name, discovery.LabelServiceName)
 	}
 	return k8stypes.NamespacedName{Namespace: endpointSlice.Namespace, Name: svcName}, nil
-}
-
-// isHostEndpoint determines if the given endpoint ip belongs to a host networked pod
-func IsHostEndpoint(endpointIPstr string) bool {
-	endpointIP := net.ParseIP(endpointIPstr)
-	for _, clusterNet := range config.Default.ClusterSubnets {
-		if clusterNet.CIDR.Contains(endpointIP) {
-			return false
-		}
-	}
-	return true
 }
 
 func getEndpointsFromEndpointSlices(endpointSlices []*discovery.EndpointSlice) []discovery.Endpoint {

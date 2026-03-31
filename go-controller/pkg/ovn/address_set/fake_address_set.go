@@ -1,6 +1,7 @@
 package addressset
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -10,10 +11,11 @@ import (
 	"k8s.io/klog/v2"
 	utilnet "k8s.io/utils/net"
 
-	"github.com/ovn-org/libovsdb/ovsdb"
+	"github.com/ovn-kubernetes/libovsdb/client"
+	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
 )
 
 func NewFakeAddressSetFactory(controllerName string) *FakeAddressSetFactory {
@@ -38,7 +40,7 @@ type FakeAddressSetFactory struct {
 // fakeFactory implements the AddressSetFactory interface
 var _ AddressSetFactory = &FakeAddressSetFactory{}
 
-const FakeASFError = "fake asf error"
+var ErrFakeASF = errors.New("fake asf error")
 
 // ErrOnNextNewASCall will make FakeAddressSetFactory return FakeASFError on the next NewAddressSet call
 func (f *FakeAddressSetFactory) ErrOnNextNewASCall() {
@@ -49,7 +51,7 @@ func (f *FakeAddressSetFactory) ErrOnNextNewASCall() {
 func (f *FakeAddressSetFactory) NewAddressSet(dbIDs *libovsdbops.DbObjectIDs, addresses []string) (AddressSet, error) {
 	if f.errOnNextNewAddrSet {
 		f.errOnNextNewAddrSet = false
-		return nil, fmt.Errorf(FakeASFError)
+		return nil, ErrFakeASF
 	}
 	if err := f.asf.validateDbIDs(dbIDs); err != nil {
 		return nil, fmt.Errorf("failed to create address set: %w", err)
@@ -72,7 +74,7 @@ func (f *FakeAddressSetFactory) NewAddressSet(dbIDs *libovsdbops.DbObjectIDs, ad
 func (f *FakeAddressSetFactory) NewAddressSetOps(dbIDs *libovsdbops.DbObjectIDs, addresses []string) (AddressSet, []ovsdb.Operation, error) {
 	if f.errOnNextNewAddrSet {
 		f.errOnNextNewAddrSet = false
-		return nil, nil, fmt.Errorf(FakeASFError)
+		return nil, nil, ErrFakeASF
 	}
 	if err := f.asf.validateDbIDs(dbIDs); err != nil {
 		return nil, nil, fmt.Errorf("failed to create address set: %w", err)
@@ -123,7 +125,7 @@ func (f *FakeAddressSetFactory) GetAddressSet(dbIDs *libovsdbops.DbObjectIDs) (A
 	if ok {
 		return set, nil
 	}
-	return nil, fmt.Errorf("error fetching address set")
+	return nil, fmt.Errorf("error fetching address set: %w", client.ErrNotFound)
 }
 
 func (f *FakeAddressSetFactory) ProcessEachAddressSet(ownerController string, indexT *libovsdbops.ObjectIDsType, iteratorFn AddressSetIterFunc) error {
@@ -298,6 +300,7 @@ type removeFunc func(string)
 type fakeAddressSet struct {
 	name      string
 	hashName  string
+	uuid      string
 	addresses map[string]string
 	destroyed uint32
 }
@@ -338,10 +341,12 @@ func (f *FakeAddressSetFactory) newFakeAddressSets(addresses []string, dbIDs *li
 
 func (f *FakeAddressSetFactory) newFakeAddressSet(addresses []string, dbIDs *libovsdbops.DbObjectIDs, ipFamily string) *fakeAddressSet {
 	name := getDbIDsWithIPFamily(dbIDs, ipFamily).String()
+	hashName := hashedAddressSet(name)
 
 	as := &fakeAddressSet{
 		name:      name,
-		hashName:  hashedAddressSet(name),
+		hashName:  hashName,
+		uuid:      "uuid-" + hashName,
 		addresses: make(map[string]string),
 	}
 	for _, address := range addresses {
@@ -358,6 +363,18 @@ func (as *fakeAddressSets) GetASHashNames() (string, string) {
 	}
 	if as.ipv6 != nil {
 		ipv6AS = as.ipv6.getHashName()
+	}
+	return ipv4AS, ipv6AS
+}
+
+func (as *fakeAddressSets) GetASUUID() (string, string) {
+	var ipv4AS string
+	var ipv6AS string
+	if as.ipv4 != nil {
+		ipv4AS = as.ipv4.uuid
+	}
+	if as.ipv6 != nil {
+		ipv6AS = as.ipv6.uuid
 	}
 	return ipv4AS, ipv6AS
 }

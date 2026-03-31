@@ -13,18 +13,18 @@ import (
 	"k8s.io/klog/v2"
 	utilnet "k8s.io/utils/net"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	nodeipt "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/iptables"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
-	utilerrors "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util/errors"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	nodeipt "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/iptables"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
+	utilerrors "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util/errors"
 )
 
 const (
-	iptableNodePortChain      = "OVN-KUBE-NODEPORT"       // called from nat-PREROUTING and nat-OUTPUT
-	iptableExternalIPChain    = "OVN-KUBE-EXTERNALIP"     // called from nat-PREROUTING and nat-OUTPUT
-	iptableETPChain           = "OVN-KUBE-ETP"            // called from nat-PREROUTING only
-	iptableITPChain           = "OVN-KUBE-ITP"            // called from mangle-OUTPUT and nat-OUTPUT
-	iptableUDNMasqueradeChain = "OVN-KUBE-UDN-MASQUERADE" // called from nat-POSTROUTING
+	iptableNodePortChain   = "OVN-KUBE-NODEPORT"   // called from nat-PREROUTING and nat-OUTPUT
+	iptableExternalIPChain = "OVN-KUBE-EXTERNALIP" // called from nat-PREROUTING and nat-OUTPUT
+	iptableETPChain        = "OVN-KUBE-ETP"        // called from nat-PREROUTING only
+	iptableITPChain        = "OVN-KUBE-ITP"        // called from mangle-OUTPUT and nat-OUTPUT
 )
 
 func clusterIPTablesProtocols() []iptables.Protocol {
@@ -68,27 +68,9 @@ func restoreIptRulesFiltered(rules []nodeipt.Rule, filter map[string]map[string]
 	return nodeipt.RestoreRulesFiltered(rules, filter)
 }
 
-// appendIptRules adds the provided rules in an append fashion
-// i.e each rule gets added at the last position in the chain
-func appendIptRules(rules []nodeipt.Rule) error {
-	return nodeipt.AddRules(rules, true)
-}
-
 // deleteIptRules removes provided rules from the chain
 func deleteIptRules(rules []nodeipt.Rule) error {
 	return nodeipt.DelRules(rules)
-}
-
-// ensureChain ensures that a chain exists within a table
-func ensureChain(table, chain string) error {
-	for _, proto := range clusterIPTablesProtocols() {
-		ipt, err := util.GetIPTablesHelper(proto)
-		if err != nil {
-			return fmt.Errorf("failed to get IPTables helper to add UDN chain: %v", err)
-		}
-		addChaintoTable(ipt, table, chain)
-	}
-	return nil
 }
 
 func getGatewayInitRules(chain string, proto iptables.Protocol) []nodeipt.Rule {
@@ -190,7 +172,7 @@ func getITPLocalIPTRules(svcPort corev1.ServicePort, clusterIP string, svcHasLoc
 				"-d", string(clusterIP),
 				"--dport", fmt.Sprintf("%d", svcPort.Port),
 				"-j", "MARK",
-				"--set-xmark", string(ovnkubeITPMark),
+				"--set-xmark", string(types.OVNKubeITPMark),
 			},
 			Protocol: getIPTablesProtocol(clusterIP),
 		},
@@ -201,15 +183,30 @@ func computeProbability(n, i int) string {
 	return fmt.Sprintf("%0.10f", 1.0/float64(n-i+1))
 }
 
-func generateIPTRulesForLoadBalancersWithoutNodePorts(svcPort corev1.ServicePort, externalIP string, localEndpoints []string) []nodeipt.Rule {
-	iptRules := make([]nodeipt.Rule, 0, len(localEndpoints))
+// generateIPTRulesForLoadBalancersWithoutNodePorts generates iptables DNAT rules for load balancer services
+// without NodePort allocation. It performs statistical load balancing between endpoints via iptables.
+func generateIPTRulesForLoadBalancersWithoutNodePorts(svcPort corev1.ServicePort, externalIP string, localEndpoints util.PortToLBEndpoints) []nodeipt.Rule {
 	if len(localEndpoints) == 0 {
 		// either its smart nic mode; etp&itp not implemented, OR
 		// fetching endpointSlices error-ed out prior to reaching here so nothing to do
-		return iptRules
+		return []nodeipt.Rule{}
 	}
-	numLocalEndpoints := len(localEndpoints)
-	for i, ip := range localEndpoints {
+
+	// Get the endpoints for the port key.
+	// svcPortKey is of format e.g. "TCP/my-port-name" or "TCP/" if name is empty
+	// (is the case when only a single ServicePort is defined on this service).
+	svcPortKey := util.GetServicePortKey(svcPort.Protocol, svcPort.Name)
+	lbEndpoints := localEndpoints[svcPortKey]
+
+	// Get IPv4 or IPv6 IPs, depending on the type of the service's external IP.
+	destinations := lbEndpoints.GetV4Destinations()
+	if utilnet.IsIPv6String(externalIP) {
+		destinations = lbEndpoints.GetV6Destinations()
+	}
+
+	numLocalEndpoints := len(destinations)
+	iptRules := make([]nodeipt.Rule, 0, numLocalEndpoints)
+	for i, destination := range destinations {
 		iptRules = append([]nodeipt.Rule{
 			{
 				Table: "nat",
@@ -219,7 +216,7 @@ func generateIPTRulesForLoadBalancersWithoutNodePorts(svcPort corev1.ServicePort
 					"-d", externalIP,
 					"--dport", fmt.Sprintf("%v", svcPort.Port),
 					"-j", "DNAT",
-					"--to-destination", util.JoinHostPortInt32(ip, int32(svcPort.TargetPort.IntValue())),
+					"--to-destination", util.JoinHostPortInt32(destination.IP, destination.Port),
 					"-m", "statistic",
 					"--mode", "random",
 					"--probability", computeProbability(numLocalEndpoints, i+1),
@@ -402,123 +399,8 @@ func getLocalGatewayFilterRules(ifname string, cidr *net.IPNet) []nodeipt.Rule {
 	}
 }
 
-func getLocalGatewayPodSubnetNATRules(cidr *net.IPNet) []nodeipt.Rule {
-	protocol := getIPTablesProtocol(cidr.IP.String())
-	return []nodeipt.Rule{
-		{
-			Table: "nat",
-			Chain: "POSTROUTING",
-			Args: []string{
-				"-s", cidr.String(),
-				"-j", "MASQUERADE",
-			},
-			Protocol: protocol,
-		},
-	}
-}
-
-// getUDNMasqueradeRules is only called for local-gateway-mode
-func getUDNMasqueradeRules(protocol iptables.Protocol) []nodeipt.Rule {
-	// the following rules are actively used only for the UDN Feature:
-	// -A POSTROUTING -j OVN-KUBE-UDN-MASQUERADE
-	// -A OVN-KUBE-UDN-MASQUERADE -s 169.254.0.0/29 -j RETURN
-	// -A OVN-KUBE-UDN-MASQUERADE -d 10.96.0.0/16 -j RETURN
-	// -A OVN-KUBE-UDN-MASQUERADE -s 169.254.0.0/17 -j MASQUERADE
-	// NOTE: Ordering is important here, the RETURN must come before
-	// the MASQUERADE rule. Please don't change the ordering.
-	srcUDNMasqueradePrefix := config.Gateway.V4MasqueradeSubnet
-	ipFamily := utilnet.IPv4
-	if protocol == iptables.ProtocolIPv6 {
-		srcUDNMasqueradePrefix = config.Gateway.V6MasqueradeSubnet
-		ipFamily = utilnet.IPv6
-	}
-	// defaultNetworkReservedMasqueradePrefix contains the first 6 IPs in the
-	// masquerade range that shouldn't be masqueraded. Hence it's always 3 bits (8
-	// IPs) wide, regardless of IP family.
-	_, ipnet, _ := net.ParseCIDR(srcUDNMasqueradePrefix)
-	_, len := ipnet.Mask.Size()
-	defaultNetworkReservedMasqueradePrefix := fmt.Sprintf("%s/%d", ipnet.IP.String(), len-3)
-
-	rules := []nodeipt.Rule{
-		{
-			Table:    "nat",
-			Chain:    "POSTROUTING",
-			Args:     []string{"-j", iptableUDNMasqueradeChain}, // NOTE: AddRules will take care of creating the chain
-			Protocol: protocol,
-		},
-		{
-			Table: "nat",
-			Chain: iptableUDNMasqueradeChain,
-			Args: []string{
-				"-s", defaultNetworkReservedMasqueradePrefix,
-				"-j", "RETURN",
-			},
-			Protocol: protocol,
-		},
-	}
-	for _, svcCIDR := range config.Kubernetes.ServiceCIDRs {
-		if utilnet.IPFamilyOfCIDR(svcCIDR) != ipFamily {
-			continue
-		}
-		rules = append(rules,
-			nodeipt.Rule{
-				Table: "nat",
-				Chain: iptableUDNMasqueradeChain,
-				Args: []string{
-					"-d", svcCIDR.String(),
-					"-j", "RETURN",
-				},
-				Protocol: protocol,
-			},
-		)
-	}
-	rules = append(rules,
-		nodeipt.Rule{
-			Table: "nat",
-			Chain: iptableUDNMasqueradeChain,
-			Args: []string{
-				"-s", srcUDNMasqueradePrefix,
-				"-j", "MASQUERADE",
-			},
-			Protocol: protocol,
-		},
-	)
-	return rules
-}
-
-func getLocalGatewayNATRules(cidr *net.IPNet) []nodeipt.Rule {
-	// Allow packets to/from the gateway interface in case defaults deny
-	protocol := getIPTablesProtocol(cidr.IP.String())
-	masqueradeIP := config.Gateway.MasqueradeIPs.V4OVNMasqueradeIP
-	if protocol == iptables.ProtocolIPv6 {
-		masqueradeIP = config.Gateway.MasqueradeIPs.V6OVNMasqueradeIP
-	}
-	rules := append(
-		[]nodeipt.Rule{
-			{
-				Table: "nat",
-				Chain: "POSTROUTING",
-				Args: []string{
-					"-s", masqueradeIP.String(),
-					"-j", "MASQUERADE",
-				},
-				Protocol: protocol,
-			},
-		},
-		getLocalGatewayPodSubnetNATRules(cidr)...,
-	)
-
-	// FIXME(tssurya): If the feature is disabled we should be removing
-	// these rules
-	if util.IsNetworkSegmentationSupportEnabled() {
-		rules = append(rules, getUDNMasqueradeRules(protocol)...)
-	}
-
-	return rules
-}
-
-// initLocalGatewayNATRules sets up iptables rules for interfaces
-func initLocalGatewayNATRules(ifname string, cidr *net.IPNet) error {
+// initLocalGatewayIPTFilterRules sets up iptables rules for interfaces
+func initLocalGatewayIPTFilterRules(ifname string, cidr *net.IPNet) error {
 	// Insert the filter table rules because they need to be evaluated BEFORE the DROP rules
 	// we have for forwarding. DO NOT change the ordering; specially important
 	// during SGW->LGW rollouts and restarts.
@@ -526,25 +408,8 @@ func initLocalGatewayNATRules(ifname string, cidr *net.IPNet) error {
 	if err != nil {
 		return fmt.Errorf("unable to insert forwarding rules %v", err)
 	}
-	// append the masquerade rules in POSTROUTING table since that needs to be
-	// evaluated last.
-	return appendIptRules(getLocalGatewayNATRules(cidr))
-}
-
-func addLocalGatewayPodSubnetNATRules(cidrs ...*net.IPNet) error {
-	var rules []nodeipt.Rule
-	for _, cidr := range cidrs {
-		rules = append(rules, getLocalGatewayPodSubnetNATRules(cidr)...)
-	}
-	return appendIptRules(rules)
-}
-
-func delLocalGatewayPodSubnetNATRules(cidrs ...*net.IPNet) error {
-	var rules []nodeipt.Rule
-	for _, cidr := range cidrs {
-		rules = append(rules, getLocalGatewayPodSubnetNATRules(cidr)...)
-	}
-	return deleteIptRules(rules)
+	// NOTE: nftables masquerade rules are now handled separately in initLocalGatewayNFTNATRules
+	return nil
 }
 
 func addChaintoTable(ipt util.IPTablesHelper, tableName, chain string) {
@@ -626,7 +491,7 @@ func recreateIPTRules(table, chain string, keepIPTRules []nodeipt.Rule) error {
 // case3: if svcHasLocalHostNetEndPnt and svcTypeIsITPLocal, rule that redirects clusterIP traffic to host targetPort is added.
 //
 //	if !svcHasLocalHostNetEndPnt and svcTypeIsITPLocal, rule that marks clusterIP traffic to steer it to ovn-k8s-mp0 is added.
-func getGatewayIPTRules(service *corev1.Service, localEndpoints []string, svcHasLocalHostNetEndPnt bool) []nodeipt.Rule {
+func getGatewayIPTRules(service *corev1.Service, localEndpoints util.PortToLBEndpoints, svcHasLocalHostNetEndPnt bool) []nodeipt.Rule {
 	rules := make([]nodeipt.Rule, 0)
 	clusterIPs := util.GetClusterIPs(service)
 	svcTypeIsETPLocal := util.ServiceExternalTrafficPolicyLocal(service)

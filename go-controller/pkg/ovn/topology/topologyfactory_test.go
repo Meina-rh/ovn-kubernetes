@@ -5,14 +5,15 @@ import (
 
 	cnitypes "github.com/containernetworking/cni/pkg/types"
 
-	libovsdbclient "github.com/ovn-org/libovsdb/client"
+	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
 
-	ovncnitypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/cni/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
-	libovsdbtest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/libovsdb"
-	ovntypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	ovncnitypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/cni/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	libovsdbtest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing/libovsdb"
+	ovntypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -87,7 +88,7 @@ var _ = Describe("Topology factory", func() {
 				ovntypes.TopologyExternalID: ovntypes.Layer3Topology,
 				"k8s-cluster-router":        "yes",
 			}
-			expectedOptions := map[string]string{"mcast_relay": "true"}
+			expectedOptions := map[string]string{"mcast_relay": "true", "always_learn_from_arp_request": "false"}
 			Expect(clusterRouter).To(
 				WithTransform(
 					removeUUID,
@@ -237,7 +238,7 @@ func expectedLogicalSwitchPort(portName string) *nbdb.LogicalSwitchPort {
 		Addresses: []string{"router"},
 		Name:      portName,
 		Options: map[string]string{
-			"router-port": "rtoj-mydearrouter",
+			libovsdbops.RouterPort: "rtoj-mydearrouter",
 		},
 		ParentName:   nil,
 		PortSecurity: nil,

@@ -1,6 +1,7 @@
 package pod
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 
@@ -10,18 +11,21 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/kubernetes/scheme"
+	corev1listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/record"
 	ref "k8s.io/client-go/tools/reference"
 	"k8s.io/klog/v2"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/id"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/ip/subnet"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/pod"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/networkmanager"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/persistentips"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/id"
+	ipallocator "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/ip"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/ip/subnet"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/mac"
+	podallocator "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/pod"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/networkmanager"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/persistentips"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 // PodAllocator acts on pods events handed off by the cluster network controller
@@ -37,7 +41,7 @@ type PodAllocator struct {
 	idAllocator id.Allocator
 
 	// An utility to allocate the PodAnnotation to pods
-	podAnnotationAllocator *pod.PodAnnotationAllocator
+	podAnnotationAllocator *podallocator.PodAnnotationAllocator
 
 	ipamClaimsReconciler persistentips.PersistentAllocations
 
@@ -50,17 +54,20 @@ type PodAllocator struct {
 	// release more than once
 	releasedPods      map[string]sets.Set[string]
 	releasedPodsMutex sync.Mutex
+
+	nodeLister corev1listers.NodeLister
 }
 
 // NewPodAllocator builds a new PodAllocator
 func NewPodAllocator(
 	netInfo util.NetInfo,
-	podAnnotationAllocator *pod.PodAnnotationAllocator,
+	podAnnotationAllocator *podallocator.PodAnnotationAllocator,
 	ipAllocator subnet.Allocator,
 	claimsReconciler persistentips.PersistentAllocations,
 	networkManager networkmanager.Interface,
 	recorder record.EventRecorder,
 	idAllocator id.Allocator,
+	nodeLister corev1listers.NodeLister,
 ) *PodAllocator {
 	podAllocator := &PodAllocator{
 		netInfo:                netInfo,
@@ -70,6 +77,7 @@ func NewPodAllocator(
 		networkManager:         networkManager,
 		recorder:               recorder,
 		idAllocator:            idAllocator,
+		nodeLister:             nodeLister,
 	}
 
 	// this network might not have IPAM, we will just allocate MAC addresses
@@ -92,6 +100,11 @@ func (a *PodAllocator) Init() error {
 		)
 	}
 
+	klog.Infof("Initializing network %s pod annotation allocator MAC registry", a.netInfo.GetNetworkName())
+	if err := a.podAnnotationAllocator.InitializeMACRegistry(); err != nil {
+		return fmt.Errorf("failed to initialize MAC addresses registry: %w", err)
+	}
+
 	return nil
 }
 
@@ -100,10 +113,16 @@ func (a *PodAllocator) Init() error {
 func (a *PodAllocator) getActiveNetworkForPod(pod *corev1.Pod) (util.NetInfo, error) {
 	activeNetwork, err := a.networkManager.GetActiveNetworkForNamespace(pod.Namespace)
 	if err != nil {
-		if util.IsUnprocessedActiveNetworkError(err) {
+		if util.IsInvalidPrimaryNetworkError(err) {
 			a.recordPodErrorEvent(pod, err)
 		}
 		return nil, err
+	}
+	// Cluster manager pod allocation should always have an active network
+	if activeNetwork == nil {
+		newErr := fmt.Errorf("no active network found for pod %s/%s", pod.Namespace, pod.Name)
+		a.recordPodErrorEvent(pod, newErr)
+		return nil, newErr
 	}
 	return activeNetwork, nil
 
@@ -111,9 +130,14 @@ func (a *PodAllocator) getActiveNetworkForPod(pod *corev1.Pod) (util.NetInfo, er
 
 // GetNetworkRole returns the role of this controller's network for the given pod
 func (a *PodAllocator) GetNetworkRole(pod *corev1.Pod) (string, error) {
-	role, err := util.GetNetworkRole(a.netInfo, a.networkManager.GetActiveNetworkForNamespace, pod)
+	role, err := util.GetNetworkRole(
+		a.netInfo,
+		a.networkManager.GetPrimaryNADForNamespace,
+		a.networkManager.GetNetworkNameForNADKey,
+		pod,
+	)
 	if err != nil {
-		if util.IsUnprocessedActiveNetworkError(err) {
+		if util.IsInvalidPrimaryNetworkError(err) {
 			a.recordPodErrorEvent(pod, err)
 		}
 		return "", err
@@ -187,8 +211,9 @@ func (a *PodAllocator) reconcile(old, new *corev1.Pod, releaseFromAllocator bool
 		if err != nil {
 			return err
 		}
-		for nadName := range podNetworks {
-			if a.netInfo.HasNAD(nadName) {
+		for nadKey := range podNetworks {
+			networkName := a.networkManager.GetNetworkNameForNADKey(nadKey)
+			if networkName != "" && networkName == a.netInfo.GetNetworkName() {
 				activeNetwork = a.netInfo
 				break
 			}
@@ -199,7 +224,13 @@ func (a *PodAllocator) reconcile(old, new *corev1.Pod, releaseFromAllocator bool
 		}
 	}
 
-	onNetwork, networkMap, err := util.GetPodNADToNetworkMappingWithActiveNetwork(pod, a.netInfo, activeNetwork)
+	onNetwork, networkMap, err := util.GetPodNADToNetworkMappingWithActiveNetwork(
+		pod,
+		a.netInfo,
+		activeNetwork,
+		a.networkManager.GetNetworkNameForNADKey,
+		a.networkManager.GetPrimaryNADForNamespace,
+	)
 	if err != nil {
 		a.recordPodErrorEvent(pod, err)
 		return fmt.Errorf("failed to get NAD to network mapping: %w", err)
@@ -213,8 +244,8 @@ func (a *PodAllocator) reconcile(old, new *corev1.Pod, releaseFromAllocator bool
 	}
 
 	// reconcile for each NAD
-	for nadName, network := range networkMap {
-		err = a.reconcileForNAD(old, new, nadName, network, releaseFromAllocator)
+	for nadKey, network := range networkMap {
+		err = a.reconcileForNAD(old, new, nadKey, network, releaseFromAllocator)
 		if err != nil {
 			return err
 		}
@@ -223,7 +254,7 @@ func (a *PodAllocator) reconcile(old, new *corev1.Pod, releaseFromAllocator bool
 	return nil
 }
 
-func (a *PodAllocator) reconcileForNAD(old, new *corev1.Pod, nad string, network *nettypes.NetworkSelectionElement, releaseIPsFromAllocator bool) error {
+func (a *PodAllocator) reconcileForNAD(old, new *corev1.Pod, nadKey string, network *nettypes.NetworkSelectionElement, releaseIPsFromAllocator bool) error {
 	var pod *corev1.Pod
 	if old != nil {
 		pod = old
@@ -235,15 +266,15 @@ func (a *PodAllocator) reconcileForNAD(old, new *corev1.Pod, nad string, network
 	podCompleted := util.PodCompleted(pod)
 
 	if podCompleted || podDeleted {
-		return a.releasePodOnNAD(pod, nad, network, podDeleted, releaseIPsFromAllocator)
+		return a.releasePodOnNAD(pod, nadKey, network, podDeleted, releaseIPsFromAllocator)
 	}
 
-	return a.allocatePodOnNAD(pod, nad, network)
+	return a.allocatePodOnNAD(pod, nadKey, network)
 }
 
-func (a *PodAllocator) releasePodOnNAD(pod *corev1.Pod, nad string, network *nettypes.NetworkSelectionElement,
+func (a *PodAllocator) releasePodOnNAD(pod *corev1.Pod, nadKey string, network *nettypes.NetworkSelectionElement,
 	podDeleted, releaseFromAllocator bool) error {
-	podAnnotation, _ := util.UnmarshalPodAnnotation(pod.Annotations, nad)
+	podAnnotation, _ := util.UnmarshalPodAnnotation(pod.Annotations, nadKey)
 	if podAnnotation == nil {
 		// track release pods even if they have no annotation in case a user
 		// might have removed it manually
@@ -267,6 +298,7 @@ func (a *PodAllocator) releasePodOnNAD(pod *corev1.Pod, nad string, network *net
 		hasIPAMClaim = false
 	}
 	if hasIPAMClaim {
+		var err error
 		ipamClaim, err := a.ipamClaimsReconciler.FindIPAMClaim(network.IPAMClaimReference, network.Namespace)
 		hasIPAMClaim = ipamClaim != nil && len(ipamClaim.Status.IPs) > 0
 		if apierrors.IsNotFound(err) {
@@ -284,12 +316,12 @@ func (a *PodAllocator) releasePodOnNAD(pod *corev1.Pod, nad string, network *net
 
 	// do not release from the allocators if not flaged to do so or if they
 	// were already previosuly released
-	doRelease := releaseFromAllocator && !a.isPodReleased(nad, uid)
+	doRelease := releaseFromAllocator && !a.isPodReleased(nadKey, uid)
 	doReleaseIDs := doRelease && hasIDAllocation
 	doReleaseIPs := doRelease && hasIPAM && !hasIPAMClaim
 
 	if doReleaseIDs {
-		name := podIdAllocationName(nad, uid)
+		name := podIdAllocationName(nadKey, uid)
 		a.idAllocator.ReleaseID(name)
 		klog.V(5).Infof("Released ID %d", podAnnotation.TunnelID)
 	}
@@ -297,27 +329,34 @@ func (a *PodAllocator) releasePodOnNAD(pod *corev1.Pod, nad string, network *net
 	if doReleaseIPs {
 		err := a.ipAllocator.ReleaseIPs(a.netInfo.GetNetworkName(), podAnnotation.IPs)
 		if err != nil {
-			return fmt.Errorf("failed to release ips %v for pod %s/%s and nad %s: %w",
+			return fmt.Errorf("failed to release ips %v for pod %s/%s and NAD key %s: %w",
 				util.StringSlice(podAnnotation.IPs),
 				pod.Name,
 				pod.Namespace,
-				nad,
+				nadKey,
 				err,
 			)
 		}
 		klog.V(5).Infof("Released IPs %v", util.StringSlice(podAnnotation.IPs))
 	}
 
+	if doRelease {
+		if err := a.podAnnotationAllocator.ReleasePodReservedMacAddress(pod, podAnnotation.MAC); err != nil {
+			return fmt.Errorf(`failed to release pod "%s/%s" mac %q: %v`,
+				pod.Namespace, pod.Name, podAnnotation.MAC, err)
+		}
+	}
+
 	if podDeleted {
-		a.deleteReleasedPod(nad, string(pod.UID))
+		a.deleteReleasedPod(nadKey, string(pod.UID))
 	} else {
-		a.addReleasedPod(nad, string(pod.UID))
+		a.addReleasedPod(nadKey, string(pod.UID))
 	}
 
 	return nil
 }
 
-func (a *PodAllocator) allocatePodOnNAD(pod *corev1.Pod, nad string, network *nettypes.NetworkSelectionElement) error {
+func (a *PodAllocator) allocatePodOnNAD(pod *corev1.Pod, nadKey string, network *nettypes.NetworkSelectionElement) error {
 	var ipAllocator subnet.NamedAllocator
 	if util.DoesNetworkRequireIPAM(a.netInfo) {
 		ipAllocator = a.ipAllocator.ForSubnet(a.netInfo.GetNetworkName())
@@ -325,7 +364,7 @@ func (a *PodAllocator) allocatePodOnNAD(pod *corev1.Pod, nad string, network *ne
 
 	var idAllocator id.NamedAllocator
 	if util.DoesNetworkRequireTunnelIDs(a.netInfo) {
-		name := podIdAllocationName(nad, string(pod.UID))
+		name := podIdAllocationName(nadKey, string(pod.UID))
 		idAllocator = a.idAllocator.ForName(name)
 	}
 
@@ -341,60 +380,73 @@ func (a *PodAllocator) allocatePodOnNAD(pod *corev1.Pod, nad string, network *ne
 		return nil
 	}
 
+	node, err := a.nodeLister.Get(pod.Spec.NodeName)
+	if err != nil {
+		return fmt.Errorf("failed to get node %q: %w", pod.Spec.NodeName, err)
+	}
+
 	updatedPod, podAnnotation, err := a.podAnnotationAllocator.AllocatePodAnnotationWithTunnelID(
 		ipAllocator,
 		idAllocator,
+		node,
 		pod,
+		nadKey,
 		network,
 		reallocate,
 		networkRole,
 	)
 
 	if err != nil {
+		if errors.Is(err, ipallocator.ErrFull) ||
+			errors.Is(err, ipallocator.ErrAllocated) ||
+			errors.Is(err, mac.ErrReserveMACConflict) ||
+			errors.Is(err, podallocator.ErrIPFamilyMismatch) {
+			a.recordPodErrorEvent(pod, err)
+		}
 		return err
 	}
 
 	if updatedPod != nil {
-		klog.V(5).Infof("Allocated IP addresses %v, mac address %s, gateways %v, routes %s and tunnel id %d for pod %s/%s on nad %s",
+		klog.V(5).Infof("Allocated IP addresses %v, mac address %s, gateways %v, routes %s and tunnel id %d for pod %s/%s on NAD key %s",
 			util.StringSlice(podAnnotation.IPs),
 			podAnnotation.MAC,
 			util.StringSlice(podAnnotation.Gateways),
 			util.StringSlice(podAnnotation.Routes),
 			podAnnotation.TunnelID,
-			pod.Namespace, pod.Name, nad,
+			pod.Namespace, pod.Name, nadKey,
 		)
 	}
 
 	return err
 }
 
-func (a *PodAllocator) addReleasedPod(nad, uid string) {
+func (a *PodAllocator) addReleasedPod(nadKey, uid string) {
 	a.releasedPodsMutex.Lock()
 	defer a.releasedPodsMutex.Unlock()
-	releasedPods := a.releasedPods[nad]
+	releasedPods := a.releasedPods[nadKey]
 	if releasedPods == nil {
-		a.releasedPods[nad] = sets.New(uid)
+		a.releasedPods[nadKey] = sets.New(uid)
 		return
 	}
 	releasedPods.Insert(uid)
 }
 
-func (a *PodAllocator) deleteReleasedPod(nad, uid string) {
+func (a *PodAllocator) deleteReleasedPod(nadKey, uid string) {
 	a.releasedPodsMutex.Lock()
 	defer a.releasedPodsMutex.Unlock()
-	releasedPods := a.releasedPods[nad]
+	releasedPods := a.releasedPods[nadKey]
 	if releasedPods != nil {
 		releasedPods.Delete(uid)
 		if releasedPods.Len() == 0 {
-			delete(a.releasedPods, nad)
+			delete(a.releasedPods, nadKey)
 		}
 	}
 }
 
-func (a *PodAllocator) isPodReleased(nad, uid string) bool {
+func (a *PodAllocator) isPodReleased(nadKey, uid string) bool {
 	a.releasedPodsMutex.Lock()
 	defer a.releasedPodsMutex.Unlock()
-	releasedPods := a.releasedPods[nad]
+	releasedPods := a.releasedPods[nadKey]
 	if releasedPods != nil {
 		return releasedPods.Has(uid)
 	}
@@ -412,6 +464,6 @@ func (a *PodAllocator) recordPodErrorEvent(pod *corev1.Pod, podErr error) {
 	}
 }
 
-func podIdAllocationName(nad, uid string) string {
-	return fmt.Sprintf("%s/%s", nad, uid)
+func podIdAllocationName(nadKey, uid string) string {
+	return fmt.Sprintf("%s/%s", nadKey, uid)
 }

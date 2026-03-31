@@ -9,12 +9,13 @@ tags:
   ovnkube-master: false
   ovnkube-node: false
   ovnkube-node-dpu: false
+  ovnkube-single-node-zone-dpu: false
   ovnkube-node-dpu-host: false
   ovnkube-zone-controller: false
 
 # -- Endpoint of Kubernetes api server
 k8sAPIServer: https://172.25.0.2:6443
-# -- IP range for Kubernetes pods, /14 is the top level range, under which each /23 range will be assigned to a node
+# -- IP range for Kubernetes pods, /16 is the top level range, under which each /24 range will be assigned to a node
 podNetwork: 10.244.0.0/16/24
 # -- A comma-separated set of CIDR notation IP ranges from which k8s assigns service cluster IPs. This should be the same as the value provided for kube-apiserver "--service-cluster-ip-range" option
 serviceNetwork: 10.96.0.0/16
@@ -40,14 +41,14 @@ global:
   v4JoinSubnet: "100.64.0.0/16"
   # -- The v4 masquerade subnet used for assigning masquerade IPv4 addresses
   v4MasqueradeSubnet: "169.254.0.0/17"
-  # -- The v4 subnet for transit switch
-  v4TransitSwitchSubnet: "100.88.0.0/16"
+  # -- The v4 subnet for transit switches and routers
+  v4TransitSubnet: "100.88.0.0/16"
   # -- The v6 join subnet used for assigning join switch IPv6 addresses
   v6JoinSubnet: "fd98::/64"
   # -- The v6 masquerade subnet used for assigning masquerade IPv6 addresses
   v6MasqueradeSubnet: "fd69::/112"
-  # -- The v6 subnet for transit switch
-  v6TransitSwitchSubnet: "fd97::/64"
+  # -- The v6 subnet for transit switches and routers
+  v6TransitSubnet: "fd97::/64"
   # -- Whether or not enable ovnkube identity webhook
   enableOvnKubeIdentity: true
   # -- Indicate if ovnkube run master and node in one process
@@ -68,10 +69,36 @@ global:
   enableEgressFirewall: true
   # -- Configure to use EgressQoS CRD feature with ovn-kubernetes
   enableEgressQos: true
+  # -- Enables network QoS support from/to pods
+  enableNetworkQos: false
   # -- Enables multicast support between the pods within the same namespace
   enableMulticast: ""
   # -- Configure to use multiple NetworkAttachmentDefinition CRD feature with ovn-kubernetes
   enableMultiNetwork: false
+  # -- Configure to use user defined networks (UDN) feature with ovn-kubernetes
+  enableNetworkSegmentation: false
+  # -- Configure to use route advertisements feature with ovn-kubernetes
+  enableRouteAdvertisements: false
+  # -- Configure to use EVPN feature with ovn-kubernetes
+  enableEVPN: false
+  # -- Advertise default network on all nodes with a default RouteAdvertisements configuration
+  advertiseDefaultNetwork: false
+  # -- Pod network isolation between advertised UDN networks. (strict or loose)
+  advertisedUDNIsolationMode: "strict"
+  # -- Configure to enable no-overlay mode for the default network
+  enableNoOverlay: false
+  # -- Configure to enable SNAT for outbound traffic in no-overlay mode
+  enableNoOverlaySnat: false
+  # -- Configure to enable managed routing mode for no-overlay (automatically configures internal BGP fabric)
+  enableNoOverlayManagedRouting: false
+  # -- BGP AS number for managed routing mode
+  managedBGPASNumber: 64512
+  # -- BGP topology for managed routing mode (currently only full-mesh)
+  managedBGPTopology: "full-mesh"
+  # -- FRR namespace for managed routing mode
+  managedBGPFRRNamespace: "frr-k8s-system"
+  # -- Configure to enable workloads with preconfigured network connect to user defined networks (UDN) with ovn-kubernetes
+  enablePreconfiguredUDNAddresses: false
   # -- Configure to enable IPsec
   enableIpsec: false
   # -- Use SSL transport to NB/SB db and northd
@@ -101,6 +128,8 @@ global:
   enablePersistentIPs: true
   # -- Configure to use DNSNameResolver feature with ovn-kubernetes
   enableDNSNameResolver: false
+  # -- Configure to allow ICMP and ICMPv6 traffic to bypass NetworkPolicy deny rules
+  allowICMPNetworkPolicy: false
   # -- Whether to disable SNAT of egress traffic in namespaces annotated with routing-external-gws
   disableSnatMultipleGws: ""
   # -- Controls if forwarding is allowed on OVNK controlled interfaces
@@ -108,8 +137,6 @@ global:
   disableForwarding: ""
   # -- Disables adding openflow flows to check packets too large to be delivered to OVN due to pod MTU being lower than NIC MTU
   disablePacketMtuCheck: ""
-  # -- Deprecated: iface-id-ver is always enabled
-  disableIfaceIdVer: false
   # -- The largest number of messages per second that gets logged before drop
   # @default 20
   aclLoggingRateLimit: 20
@@ -153,10 +180,6 @@ global:
     # -- Image pull policy
     pullPolicy: IfNotPresent
 
-ovnkube-identity:
-    # -- number of ovnube-identity pods, co-located with kube-apiserver process, so need to be the same number of control plane nodes
-    replicas: 1
-
 # -- prometheus monitoring related fields
 monitoring:
   # -- specify the labels for serviceMonitors to be selected for target discovery.
@@ -165,3 +188,7 @@ monitoring:
   # in defining that.
   commonServiceMonitorSelectorLabels:
     release: kube-prometheus-stack
+  # -- deploy ServiceMonitors for service discovery using the Prometheus Operator
+  enableServiceMonitor: false
+  # -- deploy PrometheusRules for specific metric collection using the Prometheus Operator
+  enablePrometheusRule: false

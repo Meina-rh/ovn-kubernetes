@@ -6,10 +6,10 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 
-	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
-	libovsdbutil "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/util"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	libovsdbutil "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
 )
 
 type defaultMcastACLTypeID string
@@ -119,13 +119,13 @@ func (bnc *BaseNetworkController) createMulticastAllowPolicy(ns string, nsInfo *
 	egressMatch := libovsdbutil.GetACLMatch(portGroupName, bnc.getMulticastACLEgrMatch(), aclDir)
 	dbIDs := getNamespaceMcastACLDbIDs(ns, aclDir, bnc.controllerName)
 	aclPipeline := libovsdbutil.ACLDirectionToACLPipeline(aclDir)
-	egressACL := libovsdbutil.BuildACL(dbIDs, types.DefaultMcastAllowPriority, egressMatch, nbdb.ACLActionAllow, nil, aclPipeline)
+	egressACL := libovsdbutil.BuildACLWithDefaultTier(dbIDs, types.DefaultMcastAllowPriority, egressMatch, nbdb.ACLActionAllow, nil, aclPipeline)
 
 	aclDir = libovsdbutil.ACLIngress
 	ingressMatch := libovsdbutil.GetACLMatch(portGroupName, bnc.getMulticastACLIgrMatch(nsInfo), aclDir)
 	dbIDs = getNamespaceMcastACLDbIDs(ns, aclDir, bnc.controllerName)
 	aclPipeline = libovsdbutil.ACLDirectionToACLPipeline(aclDir)
-	ingressACL := libovsdbutil.BuildACL(dbIDs, types.DefaultMcastAllowPriority, ingressMatch, nbdb.ACLActionAllow, nil, aclPipeline)
+	ingressACL := libovsdbutil.BuildACLWithDefaultTier(dbIDs, types.DefaultMcastAllowPriority, ingressMatch, nbdb.ACLActionAllow, nil, aclPipeline)
 
 	acls := []*nbdb.ACL{egressACL, ingressACL}
 	ops, err := libovsdbops.CreateOrUpdateACLsOps(bnc.nbClient, nil, bnc.GetSamplingConfig(), acls...)
@@ -186,7 +186,7 @@ func (bnc *BaseNetworkController) createDefaultDenyMulticastPolicy() error {
 	for _, aclDir := range []libovsdbutil.ACLDirection{libovsdbutil.ACLEgress, libovsdbutil.ACLIngress} {
 		dbIDs := getDefaultMcastACLDbIDs(mcastDefaultDenyID, aclDir, bnc.controllerName)
 		aclPipeline := libovsdbutil.ACLDirectionToACLPipeline(aclDir)
-		acl := libovsdbutil.BuildACL(dbIDs, types.DefaultMcastDenyPriority, match, nbdb.ACLActionDrop, nil, aclPipeline)
+		acl := libovsdbutil.BuildACLWithDefaultTier(dbIDs, types.DefaultMcastDenyPriority, match, nbdb.ACLActionDrop, nil, aclPipeline)
 		acls = append(acls, acl)
 	}
 	ops, err := libovsdbops.CreateOrUpdateACLsOps(bnc.nbClient, nil, bnc.GetSamplingConfig(), acls...)
@@ -199,7 +199,7 @@ func (bnc *BaseNetworkController) createDefaultDenyMulticastPolicy() error {
 		return err
 	}
 
-	if !bnc.IsSecondary() {
+	if !bnc.IsUserDefinedNetwork() {
 		// Remove old multicastDefaultDeny port group now that all ports
 		// have been added to the clusterPortGroup by WatchPods()
 		ops, err = libovsdbops.DeletePortGroupsOps(bnc.nbClient, ops, legacyMulticastDefaultDenyPortGroup)
@@ -228,7 +228,7 @@ func (bnc *BaseNetworkController) createDefaultAllowMulticastPolicy() error {
 		match := libovsdbutil.GetACLMatch(rtrPGName, mcastMatch, aclDir)
 		dbIDs := getDefaultMcastACLDbIDs(mcastAllowInterNodeID, aclDir, bnc.controllerName)
 		aclPipeline := libovsdbutil.ACLDirectionToACLPipeline(aclDir)
-		acl := libovsdbutil.BuildACL(dbIDs, types.DefaultMcastAllowPriority, match, nbdb.ACLActionAllow, nil, aclPipeline)
+		acl := libovsdbutil.BuildACLWithDefaultTier(dbIDs, types.DefaultMcastAllowPriority, match, nbdb.ACLActionAllow, nil, aclPipeline)
 		acls = append(acls, acl)
 	}
 

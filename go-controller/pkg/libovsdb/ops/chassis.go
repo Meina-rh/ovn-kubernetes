@@ -2,13 +2,16 @@ package ops
 
 import (
 	"context"
+	"fmt"
+
+	"github.com/google/uuid"
 
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	libovsdbclient "github.com/ovn-org/libovsdb/client"
+	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/sbdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/sbdb"
 )
 
 // ListChassis looks up all chassis from the cache
@@ -138,30 +141,52 @@ func DeleteChassisWithPredicate(sbClient libovsdbclient.Client, p chassisPredica
 }
 
 // CreateOrUpdateChassis creates or updates the chassis record along with the encap record
-func CreateOrUpdateChassis(sbClient libovsdbclient.Client, chassis *sbdb.Chassis, encap *sbdb.Encap) error {
+func CreateOrUpdateChassis(sbClient libovsdbclient.Client, chassis *sbdb.Chassis, encaps ...*sbdb.Encap) error {
 	m := newModelClient(sbClient)
-	opModels := []operationModel{
-		{
+	opModels := make([]operationModel, 0, len(encaps)+1)
+	for i := range encaps {
+		encap := encaps[i]
+		opModel := operationModel{
 			Model: encap,
 			DoAfter: func() {
-				chassis.Encaps = []string{encap.UUID}
+				encapsList := append(chassis.Encaps, encap.UUID)
+				chassis.Encaps = sets.New(encapsList...).UnsortedList()
 			},
-			OnModelUpdates: onModelUpdatesAllNonDefault(),
+			OnModelUpdates: onModelUpdatesNone(),
 			ErrNotFound:    false,
 			BulkOp:         false,
-		},
-		{
-			Model:            chassis,
-			OnModelMutations: []interface{}{&chassis.OtherConfig},
-			OnModelUpdates:   []interface{}{&chassis.Encaps},
-			ErrNotFound:      false,
-			BulkOp:           false,
-		},
+		}
+		opModels = append(opModels, opModel)
 	}
 
+	opModel := operationModel{
+		Model:            chassis,
+		OnModelMutations: []interface{}{&chassis.OtherConfig},
+		OnModelUpdates:   []interface{}{&chassis.Encaps},
+		ErrNotFound:      false,
+		BulkOp:           false,
+	}
+
+	opModels = append(opModels, opModel)
 	if _, err := m.CreateOrUpdate(opModels...); err != nil {
 		return err
 	}
 
+	return nil
+}
+
+// validateRequestedChassisOption is a guard to ensure a caller is using the chassis-id (uuid format)
+// for the requested chassis option.
+func validateRequestedChassisOption(options map[string]string) error {
+	if len(options) == 0 {
+		return nil
+	}
+	chassisID, ok := options[RequestedChassis]
+	if !ok || chassisID == "" {
+		return nil
+	}
+	if _, err := uuid.Parse(chassisID); err != nil {
+		return fmt.Errorf("requested-chassis must be a valid UUID, got %q", chassisID)
+	}
 	return nil
 }

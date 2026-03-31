@@ -26,7 +26,7 @@ so that they remain relevant. Open a commit adding it to our `docs/design` folde
 
 * **Feature Docs**: If your enhancement proposal has merged; next step is to
 implement that feature. As part of the main implementation PR we mandate adding a
-feature documentation commit. See [here](https://github.com/ovn-org/ovn-kubernetes/blob/master/docs/features/template.md)
+feature documentation commit. See [here](https://github.com/ovn-kubernetes/ovn-kubernetes/blob/master/docs/features/template.md)
 for how a feature documentation should be done. Open a commit adding it to our
 `docs/features` folder.
 
@@ -66,12 +66,20 @@ a GitHub Action workflow that will automatically publish the changes to the webs
 
 ## How to test your documentation changes?
 
+### Option 1) Build and view docs with a PR
+
+Pushing docs changes to the ovn-kubernetes/ovn-kubernetes project as a pull request will
+run the job name "[Test and Deploy static content to Pages](https://github.com/ovn-kubernetes/ovn-kubernetes/blob/master/.github/workflows/docs.yml)" which has a step to save the
+docs artifacts. You can download those as a .zip file, extract and view them locally.
+
+### Option 2) Build and serve docs locally
+
 In order to test changes locally to either mkdocs.yml or to files under docs/ folder,
 please follow the instructions below.
 
 ## Clone the repository
 ```text
-# git clone https://github.com/ovn-org/ovn-kubernetes
+# git clone https://github.com/ovn-kubernetes/ovn-kubernetes
 Cloning into 'ovn-kubernetes'...
 remote: Enumerating objects: 84258, done.
 remote: Counting objects: 100% (1546/1546), done.

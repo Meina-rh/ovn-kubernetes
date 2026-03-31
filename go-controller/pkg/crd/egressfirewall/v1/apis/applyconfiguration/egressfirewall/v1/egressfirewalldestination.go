@@ -18,15 +18,24 @@ limitations under the License.
 package v1
 
 import (
-	v1 "k8s.io/client-go/applyconfigurations/meta/v1"
+	metav1 "k8s.io/client-go/applyconfigurations/meta/v1"
 )
 
 // EgressFirewallDestinationApplyConfiguration represents a declarative configuration of the EgressFirewallDestination type for use
 // with apply.
+//
+// EgressFirewallDestination is the target that traffic is either allowed or denied to
 type EgressFirewallDestinationApplyConfiguration struct {
-	CIDRSelector *string                             `json:"cidrSelector,omitempty"`
-	DNSName      *string                             `json:"dnsName,omitempty"`
-	NodeSelector *v1.LabelSelectorApplyConfiguration `json:"nodeSelector,omitempty"`
+	// cidrSelector is the CIDR range to allow/deny traffic to. If this is set, dnsName and nodeSelector must be unset.
+	CIDRSelector *string `json:"cidrSelector,omitempty"`
+	// dnsName is the domain name to allow/deny traffic to. If this is set, cidrSelector and nodeSelector must be unset.
+	// For a wildcard DNS name, the '*' will match only one label. Additionally, only a single '*' can be
+	// used at the beginning of the wildcard DNS name. For example, '*.example.com' will match 'sub1.example.com'
+	// but won't match 'sub2.sub1.example.com'.
+	DNSName *string `json:"dnsName,omitempty"`
+	// nodeSelector will allow/deny traffic to the Kubernetes node IP of selected nodes. If this is set,
+	// cidrSelector and DNSName must be unset.
+	NodeSelector *metav1.LabelSelectorApplyConfiguration `json:"nodeSelector,omitempty"`
 }
 
 // EgressFirewallDestinationApplyConfiguration constructs a declarative configuration of the EgressFirewallDestination type for use with
@@ -54,7 +63,7 @@ func (b *EgressFirewallDestinationApplyConfiguration) WithDNSName(value string) 
 // WithNodeSelector sets the NodeSelector field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the NodeSelector field is set to the value of the last call.
-func (b *EgressFirewallDestinationApplyConfiguration) WithNodeSelector(value *v1.LabelSelectorApplyConfiguration) *EgressFirewallDestinationApplyConfiguration {
+func (b *EgressFirewallDestinationApplyConfiguration) WithNodeSelector(value *metav1.LabelSelectorApplyConfiguration) *EgressFirewallDestinationApplyConfiguration {
 	b.NodeSelector = value
 	return b
 }

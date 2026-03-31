@@ -63,6 +63,9 @@ spec:
         - mountPath: /ovn-cert
           name: host-ovn-cert
           readOnly: true
+        - mountPath: /run/ovnkube-config
+          name: ovnkube-config
+          readOnly: true
         - mountPath: /var/run/ovn/
           name: host-var-run-ovs
         - mountPath: /var/run/openvswitch/
@@ -74,11 +77,15 @@ spec:
             memory: 300Mi
         env:
         - name: OVN_DAEMONSET_VERSION
-          value: "1.0.0"
+          value: "1.2.0"
         - name: OVN_LOGLEVEL_NB
           value: "{{ ovn_loglevel_nb }}"
         - name: OVN_NORTHD_BACKOFF_INTERVAL
           value: "{{ ovn_northd_backoff_interval }}"
+        - name: OVN_GATEWAY_MODE
+          value: "{{ ovn_gateway_mode }}"
+        - name: OVN_ROUTE_ADVERTISEMENTS_ENABLE
+          value: "{{ ovn_route_advertisements_enable }}"
         - name: K8S_APISERVER
           valueFrom:
             configMapKeyRef:
@@ -133,6 +140,9 @@ spec:
         - mountPath: /ovn-cert
           name: host-ovn-cert
           readOnly: true
+        - mountPath: /run/ovnkube-config
+          name: ovnkube-config
+          readOnly: true
         - mountPath: /var/run/ovn/
           name: host-var-run-ovs
         - mountPath: /var/run/openvswitch/
@@ -144,7 +154,7 @@ spec:
             memory: 300Mi
         env:
         - name: OVN_DAEMONSET_VERSION
-          value: "1.0.0"
+          value: "1.2.0"
         - name: OVN_LOGLEVEL_SB
           value: "{{ ovn_loglevel_sb }}"
         - name: K8S_APISERVER
@@ -211,7 +221,7 @@ spec:
             memory: 300Mi
         env:
         - name: OVN_DAEMONSET_VERSION
-          value: "1.0.0"
+          value: "1.2.0"
         - name: OVN_LOGLEVEL_NORTHD
           value: "{{ ovn_loglevel_northd }}"
         - name: K8S_APISERVER
@@ -299,16 +309,26 @@ spec:
           name: run-systemd
           subPath: private
           readOnly: true
+        - mountPath: /var/run/k8s.cni.cncf.io/devinfo/dp
+          name: host-devinfo-dp
+          readOnly: true
+        - mountPath: /run/ovnkube-config
+          name: ovnkube-config
+          readOnly: true
 
         resources:
           requests:
             cpu: 100m
             memory: 300Mi
         env:
+        {% if (enable_coredumps | default("false")) == "true" -%}
+        - name: GOTRACEBACK
+          value: "crash"
+        {% endif -%}
         - name: OVN_EGRESSSERVICE_ENABLE
           value: "{{ ovn_egress_service_enable }}"
         - name: OVN_DAEMONSET_VERSION
-          value: "1.0.0"
+          value: "1.2.0"
         - name: OVNKUBE_LOGLEVEL
           value: "{{ ovnkube_node_loglevel }}"
         - name: OVNKUBE_LOGFILE_MAXSIZE
@@ -385,6 +405,8 @@ spec:
           value: "{{ ovn_disable_forwarding }}"
         - name: OVN_ENCAP_PORT
           value: "{{ ovn_encap_port }}"
+        - name: METRICS_IP
+          value: "{{ metrics_ip }}"
         - name: OVN_DISABLE_PKT_MTU_CHECK
           value: "{{ ovn_disable_pkt_mtu_check }}"
         - name: OVN_NETFLOW_TARGETS
@@ -415,8 +437,6 @@ spec:
           value: "{{ ovn_ex_gw_networking_interface }}"
         - name: OVN_SSL_ENABLE
           value: "{{ ovn_ssl_en }}"
-        - name: OVN_DISABLE_OVN_IFACE_ID_VER
-          value: "{{ ovn_disable_ovn_iface_id_ver }}"
         - name: OVN_REMOTE_PROBE_INTERVAL
           value: "{{ ovn_remote_probe_interval }}"
         - name: OVN_MONITOR_ALL
@@ -433,8 +453,22 @@ spec:
           value: "{{ ovn_multi_network_enable }}"
         - name: OVN_NETWORK_SEGMENTATION_ENABLE
           value: "{{ ovn_network_segmentation_enable }}"
+        - name: OVN_NETWORK_CONNECT_ENABLE
+          value: "{{ ovn_network_connect_enable }}"
+        - name: OVN_PRE_CONF_UDN_ADDR_ENABLE
+          value: "{{ ovn_pre_conf_udn_addr_enable }}"
+        - name: OVN_DYNAMIC_UDN_ALLOCATION
+          value: "{{ ovn_enable_dynamic_udn_allocation }}"
+        - name: OVN_DYNAMIC_UDN_GRACE_PERIOD
+          value: "{{ ovn_dynamic_udn_grace_period }}"
         - name: OVN_ROUTE_ADVERTISEMENTS_ENABLE
           value: "{{ ovn_route_advertisements_enable }}"
+        - name: OVN_EVPN_ENABLE
+          value: "{{ ovn_evpn_enable }}"
+        - name: OVN_ADVERTISED_UDN_ISOLATION_MODE
+          value: "{{ ovn_advertised_udn_isolation_mode }}"
+        - name: OVN_NO_OVERLAY_ENABLE
+          value: "{{ ovn_no_overlay_enable }}"
         - name: OVNKUBE_NODE_MGMT_PORT_NETDEV
           value: "{{ ovnkube_node_mgmt_port_netdev }}"
         - name: OVN_EMPTY_LB_EVENTS
@@ -460,8 +494,12 @@ spec:
           value: "{{ ovn_enable_ovnkube_identity }}"
         - name: OVN_ENABLE_SVC_TEMPLATE_SUPPORT
           value: "{{ ovn_enable_svc_template_support }}"
+        - name: OVN_NETWORK_QOS_ENABLE
+          value: "{{ ovn_network_qos_enable }}"
         - name: OVN_ENABLE_DNSNAMERESOLVER
           value: "{{ ovn_enable_dnsnameresolver }}"
+        - name: OVN_ALLOW_ICMP_NETPOL
+          value: "{{ ovn_allow_icmp_netpol }}"
 
         readinessProbe:
           exec:
@@ -504,7 +542,7 @@ spec:
             memory: 300Mi
         env:
         - name: OVN_DAEMONSET_VERSION
-          value: "1.0.0"
+          value: "1.2.0"
         - name: OVN_LOGLEVEL_CONTROLLER
           value: "{{ ovn_loglevel_controller }}"
         - name: K8S_APISERVER
@@ -560,7 +598,7 @@ spec:
             memory: 300Mi
         env:
         - name: OVN_DAEMONSET_VERSION
-          value: "1.0.0"
+          value: "1.2.0"
         - name: K8S_NODE_IP
           valueFrom:
             fieldRef:
@@ -569,6 +607,8 @@ spec:
           value: "local"
         - name: OVN_SOUTH
           value: "local"
+        - name: METRICS_IP
+          value: "{{ metrics_ip }}"
         # end of container
 
       nodeSelector:
@@ -622,6 +662,9 @@ spec:
         hostPath:
           path: /etc/ovn
           type: DirectoryOrCreate
+      - name: ovnkube-config
+        configMap:
+          name: ovnkube-config
       - name: host-etc-ovs
         hostPath:
           path: /etc/openvswitch
@@ -631,6 +674,9 @@ spec:
       - name: run-systemd
         hostPath:
           path: /run/systemd
+      - name: host-devinfo-dp
+        hostPath:
+          path: /var/run/k8s.cni.cncf.io/devinfo/dp
 
       tolerations:
       - operator: "Exists"

@@ -10,12 +10,12 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	utilnet "k8s.io/utils/net"
 
-	"github.com/ovn-org/libovsdb/client"
+	"github.com/ovn-kubernetes/libovsdb/client"
 
-	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
-	ovntypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	ovntypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 type PolicyBasedRoutesManager struct {
@@ -238,7 +238,7 @@ func (pbr *PolicyBasedRoutesManager) createPolicyBasedRoutes(match, priority, ne
 		Nexthops: []string{nexthops},
 		Action:   nbdb.LogicalRouterPolicyActionReroute,
 	}
-	if pbr.netInfo.IsSecondary() {
+	if pbr.netInfo.IsUserDefinedNetwork() {
 		lrp.ExternalIDs = map[string]string{
 			ovntypes.NetworkExternalID:  pbr.netInfo.GetNetworkName(),
 			ovntypes.TopologyExternalID: pbr.netInfo.TopologyType(),

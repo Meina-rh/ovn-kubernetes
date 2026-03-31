@@ -18,13 +18,13 @@ limitations under the License.
 package v1
 
 import (
-	"context"
+	context "context"
 	time "time"
 
-	egressipv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
-	versioned "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/clientset/versioned"
-	internalinterfaces "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/informers/externalversions/internalinterfaces"
-	v1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/listers/egressip/v1"
+	crdegressipv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
+	versioned "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/clientset/versioned"
+	internalinterfaces "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/informers/externalversions/internalinterfaces"
+	egressipv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/listers/egressip/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	watch "k8s.io/apimachinery/pkg/watch"
@@ -35,7 +35,7 @@ import (
 // EgressIPs.
 type EgressIPInformer interface {
 	Informer() cache.SharedIndexInformer
-	Lister() v1.EgressIPLister
+	Lister() egressipv1.EgressIPLister
 }
 
 type egressIPInformer struct {
@@ -55,21 +55,33 @@ func NewEgressIPInformer(client versioned.Interface, resyncPeriod time.Duration,
 // one. This reduces memory footprint and number of connections to the server.
 func NewFilteredEgressIPInformer(client versioned.Interface, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) cache.SharedIndexInformer {
 	return cache.NewSharedIndexInformer(
-		&cache.ListWatch{
+		cache.ToListWatcherWithWatchListSemantics(&cache.ListWatch{
 			ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.K8sV1().EgressIPs().List(context.TODO(), options)
+				return client.K8sV1().EgressIPs().List(context.Background(), options)
 			},
 			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.K8sV1().EgressIPs().Watch(context.TODO(), options)
+				return client.K8sV1().EgressIPs().Watch(context.Background(), options)
 			},
-		},
-		&egressipv1.EgressIP{},
+			ListWithContextFunc: func(ctx context.Context, options metav1.ListOptions) (runtime.Object, error) {
+				if tweakListOptions != nil {
+					tweakListOptions(&options)
+				}
+				return client.K8sV1().EgressIPs().List(ctx, options)
+			},
+			WatchFuncWithContext: func(ctx context.Context, options metav1.ListOptions) (watch.Interface, error) {
+				if tweakListOptions != nil {
+					tweakListOptions(&options)
+				}
+				return client.K8sV1().EgressIPs().Watch(ctx, options)
+			},
+		}, client),
+		&crdegressipv1.EgressIP{},
 		resyncPeriod,
 		indexers,
 	)
@@ -80,9 +92,9 @@ func (f *egressIPInformer) defaultInformer(client versioned.Interface, resyncPer
 }
 
 func (f *egressIPInformer) Informer() cache.SharedIndexInformer {
-	return f.factory.InformerFor(&egressipv1.EgressIP{}, f.defaultInformer)
+	return f.factory.InformerFor(&crdegressipv1.EgressIP{}, f.defaultInformer)
 }
 
-func (f *egressIPInformer) Lister() v1.EgressIPLister {
-	return v1.NewEgressIPLister(f.Informer().GetIndexer())
+func (f *egressIPInformer) Lister() egressipv1.EgressIPLister {
+	return egressipv1.NewEgressIPLister(f.Informer().GetIndexer())
 }

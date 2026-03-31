@@ -3,6 +3,8 @@ package kube
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 
 	ipamclaimsapi "github.com/k8snetworkplumbingwg/ipamclaims/pkg/crd/ipamclaims/v1alpha1"
 	ipamclaimssclientset "github.com/k8snetworkplumbingwg/ipamclaims/pkg/crd/ipamclaims/v1alpha1/apis/clientset/versioned"
@@ -12,7 +14,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
@@ -22,13 +23,14 @@ import (
 	"k8s.io/klog/v2"
 	anpclientset "sigs.k8s.io/network-policy-api/pkg/client/clientset/versioned"
 
-	adminpolicybasedrouteclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1/apis/clientset/versioned"
-	egressfirewall "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1"
-	egressfirewallclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/clientset/versioned"
-	egressipv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
-	egressipclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/clientset/versioned"
-	egressqosclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/clientset/versioned"
-	egressserviceclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1/apis/clientset/versioned"
+	adminpolicybasedrouteclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1/apis/clientset/versioned"
+	egressfirewall "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1"
+	egressfirewallclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/clientset/versioned"
+	egressipv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
+	egressipclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/clientset/versioned"
+	egressqosclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/clientset/versioned"
+	egressserviceclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1/apis/clientset/versioned"
+	networkqosclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/networkqos/v1alpha1/apis/clientset/versioned"
 )
 
 // InterfaceOVN represents the exported methods for dealing with getting/setting
@@ -55,18 +57,15 @@ type Interface interface {
 	SetAnnotationsOnService(namespace, serviceName string, annotations map[string]interface{}) error
 	SetAnnotationsOnNode(nodeName string, annotations map[string]interface{}) error
 	SetAnnotationsOnNamespace(namespaceName string, annotations map[string]interface{}) error
-	SetTaintOnNode(nodeName string, taint *corev1.Taint) error
-	RemoveTaintFromNode(nodeName string, taint *corev1.Taint) error
 	SetLabelsOnNode(nodeName string, labels map[string]interface{}) error
 	PatchNode(old, new *corev1.Node) error
 	UpdateNodeStatus(node *corev1.Node) error
-	UpdatePodStatus(pod *corev1.Pod) error
-	GetAnnotationsOnPod(namespace, name string) (map[string]string, error)
-	GetNodes() ([]*corev1.Node, error)
-	GetNamespaces(labelSelector metav1.LabelSelector) ([]*corev1.Namespace, error)
-	GetPods(namespace string, opts metav1.ListOptions) ([]*corev1.Pod, error)
-	GetPod(namespace, name string) (*corev1.Pod, error)
-	GetNode(name string) (*corev1.Node, error)
+	PatchPodStatusAnnotations(oldPod, newPod *corev1.Pod) error
+	// GetPodsForDBChecker should only be used by legacy DB checker. Use watchFactory instead to get pods.
+	GetPodsForDBChecker(namespace string, opts metav1.ListOptions) ([]*corev1.Pod, error)
+	// GetNodeForWindows should only be used for windows hybrid overlay binary and never in linux code
+	GetNodeForWindows(name string) (*corev1.Node, error)
+	GetNodesForWindows() ([]*corev1.Node, error)
 	Events() kv1core.EventInterface
 }
 
@@ -89,6 +88,7 @@ type KubeOVN struct {
 	EgressQoSClient      egressqosclientset.Interface
 	IPAMClaimsClient     ipamclaimssclientset.Interface
 	NADClient            nadclientset.Interface
+	NetworkQoSClient     networkqosclientset.Interface
 }
 
 // SetAnnotationsOnPod takes the pod object and map of key/value string pairs to set as annotations
@@ -114,6 +114,132 @@ func (k *Kube) SetAnnotationsOnPod(namespace, podName string, annotations map[st
 	_, err = k.KClient.CoreV1().Pods(namespace).Patch(context.TODO(), podName, types.MergePatchType, patchData, metav1.PatchOptions{}, "status")
 	if err != nil {
 		klog.Errorf("Error in setting annotation on pod %s: %v", podDesc, err)
+	}
+	return err
+}
+
+type jsonPatchOp struct {
+	Op    string      `json:"op"`
+	Path  string      `json:"path"`
+	Value interface{} `json:"value,omitempty"`
+}
+
+func escapeJSONPatchPathKey(key string) string {
+	key = strings.ReplaceAll(key, "~", "~0")
+	return strings.ReplaceAll(key, "/", "~1")
+}
+
+// PatchPodStatusAnnotations patches only pod annotations through the status
+// subresource using compare-and-retry semantics on the old pod state.
+//
+// There are two concurrency cases to handle:
+//  1. The annotation key already exists on the old pod. In that case we can use a
+//     narrow JSON patch "test" on that specific key so we only retry if another
+//     writer changed the same annotation.
+//  2. The annotation key does not exist on the old pod. In that case a per-key
+//     "test" cannot protect us because two stale writers could both issue an
+//     unconditional "add" and the last one would win. For that create case we add
+//     a resourceVersion guard so only one writer based on that pod snapshot can
+//     create the missing key; losers will retry from the latest pod state and
+//     recompute a merged annotation value.
+//
+// Real informer/API pods always have a resourceVersion. If a synthetic caller
+// passes an object without one, we skip that extra guard and fall back to the
+// narrower per-key tests that are available.
+func (k *Kube) PatchPodStatusAnnotations(oldPod, newPod *corev1.Pod) error {
+	if oldPod.Namespace != newPod.Namespace || oldPod.Name != newPod.Name {
+		return fmt.Errorf("cannot patch annotations for different pods %s/%s and %s/%s",
+			oldPod.Namespace, oldPod.Name, newPod.Namespace, newPod.Name)
+	}
+
+	changedKeys := make(map[string]struct{})
+	for key, oldValue := range oldPod.Annotations {
+		if newValue, ok := newPod.Annotations[key]; !ok || oldValue != newValue {
+			changedKeys[key] = struct{}{}
+		}
+	}
+	for key, newValue := range newPod.Annotations {
+		if oldValue, ok := oldPod.Annotations[key]; !ok || oldValue != newValue {
+			changedKeys[key] = struct{}{}
+		}
+	}
+	if len(changedKeys) == 0 {
+		return nil
+	}
+
+	keys := make([]string, 0, len(changedKeys))
+	for key := range changedKeys {
+		keys = append(keys, key)
+	}
+
+	ops := []jsonPatchOp{}
+	requiresResourceVersionGuard := false
+	if oldPod.Annotations == nil {
+		ops = append(ops, jsonPatchOp{
+			Op:    "add",
+			Path:  "/metadata/annotations",
+			Value: map[string]string{},
+		})
+		requiresResourceVersionGuard = true
+	}
+	for _, key := range keys {
+		path := "/metadata/annotations/" + escapeJSONPatchPathKey(key)
+		oldValue, oldOK := oldPod.Annotations[key]
+		newValue, newOK := newPod.Annotations[key]
+		if oldOK {
+			ops = append(ops, jsonPatchOp{
+				Op:    "test",
+				Path:  path,
+				Value: oldValue,
+			})
+		} else if newOK {
+			requiresResourceVersionGuard = true
+		}
+		switch {
+		case newOK && oldOK:
+			ops = append(ops, jsonPatchOp{
+				Op:    "replace",
+				Path:  path,
+				Value: newValue,
+			})
+		case newOK:
+			ops = append(ops, jsonPatchOp{
+				Op:    "add",
+				Path:  path,
+				Value: newValue,
+			})
+		default:
+			ops = append(ops, jsonPatchOp{
+				Op:   "remove",
+				Path: path,
+			})
+		}
+	}
+	if requiresResourceVersionGuard && oldPod.ResourceVersion != "" {
+		ops = append([]jsonPatchOp{{
+			Op:    "test",
+			Path:  "/metadata/resourceVersion",
+			Value: oldPod.ResourceVersion,
+		}}, ops...)
+	}
+
+	patchData, err := json.Marshal(ops)
+	if err != nil {
+		return fmt.Errorf("failed to marshal annotation patch for pod %s/%s: %w", oldPod.Namespace, oldPod.Name, err)
+	}
+
+	podDesc := oldPod.Namespace + "/" + oldPod.Name
+	klog.Infof("Patching annotations on pod %s", podDesc)
+	_, err = k.KClient.CoreV1().Pods(oldPod.Namespace).Patch(
+		context.TODO(),
+		oldPod.Name,
+		types.JSONPatchType,
+		patchData,
+		metav1.PatchOptions{},
+		"status",
+	)
+	if err != nil {
+		klog.Errorf("Error in patching annotations on pod %s: %v", podDesc, err)
 	}
 	return err
 }
@@ -197,68 +323,6 @@ func (k *Kube) SetAnnotationsOnService(namespace, name string, annotations map[s
 	return err
 }
 
-// SetTaintOnNode tries to add a new taint to the node. If the taint already exists, it doesn't do anything.
-func (k *Kube) SetTaintOnNode(nodeName string, taint *corev1.Taint) error {
-	node, err := k.GetNode(nodeName)
-	if err != nil {
-		klog.Errorf("Unable to retrieve node %s for tainting %s: %v", nodeName, taint.ToString(), err)
-		return err
-	}
-	newNode := node.DeepCopy()
-	nodeTaints := newNode.Spec.Taints
-
-	var newTaints []corev1.Taint
-	for i := range nodeTaints {
-		if taint.MatchTaint(&nodeTaints[i]) {
-			klog.Infof("Taint %s already exists on Node %s", taint.ToString(), node.Name)
-			return nil
-		}
-		newTaints = append(newTaints, nodeTaints[i])
-	}
-
-	klog.Infof("Setting taint %s on Node %s", taint.ToString(), node.Name)
-	newTaints = append(newTaints, *taint)
-	newNode.Spec.Taints = newTaints
-	err = k.PatchNode(node, newNode)
-	if err != nil {
-		klog.Errorf("Unable to add taint %s on node %s: %v", taint.ToString(), node.Name, err)
-		return err
-	}
-
-	klog.Infof("Added taint %s on node %s", taint.ToString(), node.Name)
-	return nil
-}
-
-// RemoveTaintFromNode removes all the taints that have the same key and effect from the node.
-// If the taint doesn't exist, it doesn't do anything.
-func (k *Kube) RemoveTaintFromNode(nodeName string, taint *corev1.Taint) error {
-	node, err := k.GetNode(nodeName)
-	if err != nil {
-		klog.Errorf("Unable to retrieve node %s for tainting %s: %v", nodeName, taint.ToString(), err)
-		return err
-	}
-	newNode := node.DeepCopy()
-	nodeTaints := newNode.Spec.Taints
-
-	var newTaints []corev1.Taint
-	for i := range nodeTaints {
-		if taint.MatchTaint(&nodeTaints[i]) {
-			klog.Infof("Removing taint %s from Node %s", taint.ToString(), node.Name)
-			continue
-		}
-		newTaints = append(newTaints, nodeTaints[i])
-	}
-
-	newNode.Spec.Taints = newTaints
-	err = k.PatchNode(node, newNode)
-	if err != nil {
-		klog.Errorf("Unable to remove taint %s on node %s: %v", taint.ToString(), node.Name, err)
-		return err
-	}
-	klog.Infof("Removed taint %s on node %s", taint.ToString(), node.Name)
-	return nil
-}
-
 // SetLabelsOnNode takes the node name and map of key/value string pairs to set as labels
 func (k *Kube) SetLabelsOnNode(nodeName string, labels map[string]interface{}) error {
 	patch := struct {
@@ -315,39 +379,8 @@ func (k *Kube) UpdateNodeStatus(node *corev1.Node) error {
 	return err
 }
 
-// UpdatePodStatus update pod with provided pod data, limited to .Status and .ObjectMeta fields
-func (k *Kube) UpdatePodStatus(pod *corev1.Pod) error {
-	klog.Infof("Updating pod %s/%s", pod.Namespace, pod.Name)
-	_, err := k.KClient.CoreV1().Pods(pod.Namespace).UpdateStatus(context.TODO(), pod, metav1.UpdateOptions{})
-	return err
-}
-
-// GetAnnotationsOnPod obtains the pod annotations from kubernetes apiserver, given the name and namespace
-func (k *Kube) GetAnnotationsOnPod(namespace, name string) (map[string]string, error) {
-	pod, err := k.KClient.CoreV1().Pods(namespace).Get(context.TODO(), name, metav1.GetOptions{})
-	if err != nil {
-		return nil, err
-	}
-	return pod.ObjectMeta.Annotations, nil
-}
-
-// GetNamespaces returns the list of all Namespace objects matching the labelSelector
-func (k *Kube) GetNamespaces(labelSelector metav1.LabelSelector) ([]*corev1.Namespace, error) {
-	list := []*corev1.Namespace{}
-	err := pager.New(func(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
-		return k.KClient.CoreV1().Namespaces().List(ctx, opts)
-	}).EachListItem(context.TODO(), metav1.ListOptions{
-		LabelSelector:   labels.Set(labelSelector.MatchLabels).String(),
-		ResourceVersion: "0",
-	}, func(obj runtime.Object) error {
-		list = append(list, obj.(*corev1.Namespace))
-		return nil
-	})
-	return list, err
-}
-
-// GetPods returns the list of all Pod objects in a namespace matching the options
-func (k *Kube) GetPods(namespace string, opts metav1.ListOptions) ([]*corev1.Pod, error) {
+// GetPodsForDBChecker returns the list of all Pod objects in a namespace matching the options. Only used by the legacy db checker.
+func (k *Kube) GetPodsForDBChecker(namespace string, opts metav1.ListOptions) ([]*corev1.Pod, error) {
 	list := []*corev1.Pod{}
 	opts.ResourceVersion = "0"
 	err := pager.New(func(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
@@ -359,13 +392,8 @@ func (k *Kube) GetPods(namespace string, opts metav1.ListOptions) ([]*corev1.Pod
 	return list, err
 }
 
-// GetPod obtains the pod from kubernetes apiserver, given the name and namespace
-func (k *Kube) GetPod(namespace, name string) (*corev1.Pod, error) {
-	return k.KClient.CoreV1().Pods(namespace).Get(context.TODO(), name, metav1.GetOptions{})
-}
-
-// GetNodes returns the list of all Node objects from kubernetes
-func (k *Kube) GetNodes() ([]*corev1.Node, error) {
+// GetNodesForWindows returns the list of all Node objects from kubernetes. Only used by windows binary.
+func (k *Kube) GetNodesForWindows() ([]*corev1.Node, error) {
 	list := []*corev1.Node{}
 	err := pager.New(func(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
 		return k.KClient.CoreV1().Nodes().List(ctx, opts)
@@ -378,8 +406,8 @@ func (k *Kube) GetNodes() ([]*corev1.Node, error) {
 	return list, err
 }
 
-// GetNode returns the Node resource from kubernetes apiserver, given its name
-func (k *Kube) GetNode(name string) (*corev1.Node, error) {
+// GetNodeForWindows returns the Node resource from kubernetes apiserver, given its name. Only used by windows binary.
+func (k *Kube) GetNodeForWindows(name string) (*corev1.Node, error) {
 	return k.KClient.CoreV1().Nodes().Get(context.TODO(), name, metav1.GetOptions{})
 }
 

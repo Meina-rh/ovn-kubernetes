@@ -30,10 +30,10 @@ import (
 	kapi "k8s.io/kubernetes/pkg/apis/core"
 	"sigs.k8s.io/knftables"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/controller"
-	nodenft "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/nftables"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/controller"
+	nodenft "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/nftables"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 const (
@@ -357,7 +357,11 @@ func (m *UDNHostIsolationManager) runKubeletRestartTracker(ctx context.Context) 
 					klog.Errorf("Error closing dbus connection for UDN isolation: %v", err)
 				}
 				return
-			case signal := <-signalChan:
+			case signal, ok := <-signalChan:
+				if !ok || signal == nil {
+					// Channel was closed, connection is shutting down
+					return
+				}
 				klog.V(5).Infof("D-Bus event received: %#v", signal)
 				// Extract unit name from path
 				unitPath := signal.Path

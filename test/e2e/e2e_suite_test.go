@@ -9,14 +9,20 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 
-	"github.com/ovn-org/ovn-kubernetes/test/e2e/diagnostics"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/deploymentconfig"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/diagnostics"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/images"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/infraprovider"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/ipalloc"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/label"
 
+	deploymentkind "github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/deploymentconfig/configs/kind"
+	infrakind "github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/infraprovider/providers/kind"
+	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2econfig "k8s.io/kubernetes/test/e2e/framework/config"
-	"k8s.io/kubernetes/test/e2e/framework/testfiles"
-	"k8s.io/kubernetes/test/utils/image"
 )
 
 // https://github.com/kubernetes/kubernetes/blob/v1.16.4/test/e2e/e2e_test.go#L62
@@ -25,20 +31,8 @@ import (
 func handleFlags() {
 	e2econfig.CopyFlags(e2econfig.Flags, flag.CommandLine)
 	framework.RegisterCommonFlags(flag.CommandLine)
+	framework.RegisterClusterFlags(flag.CommandLine)
 	diagnostics.RegisterFlags(flag.CommandLine)
-	/*
-		Using framework.RegisterClusterFlags(flag.CommandLine) results in a panic:
-		"flag redefined: kubeconfig".
-		This happens because controller-runtime registers the kubeconfig flag as well.
-		To solve this we set the framework's kubeconfig directly via the KUBECONFIG env var
-		instead of letting it call the flag. Since we also use the provider, num-nodes flags
-		which are handled manually.
-	*/
-	flag.StringVar(&framework.TestContext.Provider, "provider", "", "The name of the Kubernetes provider (gce, gke, local, skeleton (the fallback if not set), etc.)")
-	framework.TestContext.KubeConfig = os.Getenv(clientcmd.RecommendedConfigPathEnvVar)
-
-	flag.IntVar(&framework.TestContext.CloudConfig.NumNodes, "num-nodes", framework.DefaultNumNodes,
-		fmt.Sprintf("Number of nodes in the cluster. If the default value of '%q' is used the number of schedulable nodes is auto-detected.", framework.DefaultNumNodes))
 	flag.StringVar(&reportPath, "report-path", "/tmp/kind/logs", "the path to be used to dump test failure information")
 	flag.Parse()
 }
@@ -47,34 +41,45 @@ var _ = ginkgo.BeforeSuite(func() {
 	// Make sure the framework's kubeconfig is set.
 	gomega.Expect(framework.TestContext.KubeConfig).NotTo(gomega.Equal(""), fmt.Sprintf("%s env var not set", clientcmd.RecommendedConfigPathEnvVar))
 
+	// Preload e2e test images into the cluster to avoid runtime pull
+	// failures and timeouts during test execution.
+	infraprovider.Get().PreloadImages(images.Required())
+
 	_, err := framework.LoadClientset()
 	framework.ExpectNoError(err)
-	_, err = framework.LoadConfig()
+	config, err := framework.LoadConfig()
 	framework.ExpectNoError(err)
+	client, err := clientset.NewForConfig(config)
+	framework.ExpectNoError(err, "k8 clientset is required to list nodes")
+	err = ipalloc.InitPrimaryIPAllocator(client.CoreV1().Nodes())
+	framework.ExpectNoError(err, "failed to initialize node primary IP allocator")
 })
 
 // required due to go1.13 issue: https://github.com/onsi/ginkgo/issues/602
 func TestMain(m *testing.M) {
 	// Register test flags, then parse flags.
 	handleFlags()
+	ProcessTestContextAndSetupLogging()
 
-	if framework.TestContext.ListImages {
-		for _, v := range image.GetImageConfigs() {
-			fmt.Println(v.GetE2EImage())
-		}
-		os.Exit(0)
+	// Set up infrastructure provider and deployment config
+	// Upstream currently uses KinD as its preferred platform infra, So TestMain
+	// is expected to run only there.
+	if !infrakind.IsProvider() {
+		klog.Fatal("Cluster provider must be KinD type")
 	}
-
-	framework.AfterReadingAllFlags(&framework.TestContext)
-
-	// TODO: Deprecating repo-root over time... instead just use gobindata_util.go , see #23987.
-	// Right now it is still needed, for example by
-	// test/e2e/framework/ingress/ingress_utils.go
-	// for providing the optional secret.yaml file and by
-	// test/e2e/framework/util.go for cluster/log-dump.
-	if framework.TestContext.RepoRoot != "" {
-		testfiles.AddFileSource(testfiles.RootFileSource{Root: framework.TestContext.RepoRoot})
+	infrastructure := infrakind.New()
+	if infrastructure == nil {
+		klog.Fatal("Failed to determine the infrastructure provider")
 	}
+	infraprovider.Set(infrastructure)
+	if !deploymentkind.IsKind() {
+		klog.Fatal("Deployment Config must be KinD type")
+	}
+	deployment := deploymentkind.New()
+	if deployment == nil {
+		klog.Fatal("Failed to determine the deployment config")
+	}
+	deploymentconfig.Set(deployment)
 
 	os.Exit(m.Run())
 }
@@ -89,5 +94,5 @@ func TestE2E(t *testing.T) {
 		}
 	}
 	gomega.RegisterFailHandler(framework.Fail)
-	ginkgo.RunSpecs(t, "E2E Suite")
+	ginkgo.RunSpecs(t, "E2E Suite", label.ComponentName())
 }

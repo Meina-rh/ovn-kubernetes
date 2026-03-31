@@ -6,15 +6,25 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"net/netip"
 	"os"
+	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"text/template"
 	"time"
 
+	nadapi "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/deploymentconfig"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/images"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/infraprovider"
+	infraapi "github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/infraprovider/api"
 
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -37,7 +47,6 @@ import (
 )
 
 const (
-	ovnNamespace   = "ovn-kubernetes"
 	ovnNodeSubnets = "k8s.ovn.org/node-subnets"
 	// ovnNodeZoneNameAnnotation is the node annotation name to store the node zone name.
 	ovnNodeZoneNameAnnotation = "k8s.ovn.org/zone-name"
@@ -45,18 +54,11 @@ const (
 	ovnGatewayMTUSupport = "k8s.ovn.org/gateway-mtu-support"
 )
 
-var containerRuntime = "docker"
 var singleNodePerZoneResult *bool
 
-func init() {
-	if cr, found := os.LookupEnv("CONTAINER_RUNTIME"); found {
-		containerRuntime = cr
-	}
-}
-
 type IpNeighbor struct {
-	Dst    string `dst`
-	Lladdr string `lladdr`
+	Dst    string `json:"dst"`
+	Lladdr string `json:"lladdr"`
 }
 
 // PodAnnotation describes the assigned network details for a single pod network. (The
@@ -117,7 +119,7 @@ func newAgnhostPod(namespace, name string, command ...string) *v1.Pod {
 			Containers: []v1.Container{
 				{
 					Name:    name,
-					Image:   agnhostImage,
+					Image:   images.AgnHost(),
 					Command: command,
 				},
 			},
@@ -138,7 +140,7 @@ func newLatestAgnhostPod(namespace, name string, command ...string) *v1.Pod {
 			Containers: []v1.Container{
 				{
 					Name:    name,
-					Image:   agnhostImageNew,
+					Image:   images.AgnHost(),
 					Command: command,
 				},
 			},
@@ -160,7 +162,7 @@ func newAgnhostPodOnNode(name, nodeName string, labels map[string]string, comman
 			Containers: []v1.Container{
 				{
 					Name:    name,
-					Image:   agnhostImage,
+					Image:   images.AgnHost(),
 					Command: command,
 				},
 			},
@@ -170,7 +172,7 @@ func newAgnhostPodOnNode(name, nodeName string, labels map[string]string, comman
 }
 
 // IsIPv6Cluster returns true if the kubernetes default service is IPv6
-func IsIPv6Cluster(c clientset.Interface) bool {
+func IsIPv6Cluster(c kubernetes.Interface) bool {
 	// Get the ClusterIP of the kubernetes service created in the default namespace
 	svc, err := c.CoreV1().Services(metav1.NamespaceDefault).Get(context.Background(), "kubernetes", metav1.GetOptions{})
 	if err != nil {
@@ -309,17 +311,11 @@ func externalIPServiceSpecFrom(svcName string, httpPort, updPort, clusterHTTPPor
 	return res
 }
 
-// pokeEndpoint leverages a container running the netexec command to send a "request" to a target running
+// pokeEndpointViaExternalContainer leverages a container running the netexec command to send a "request" to a target running
 // netexec on the given target host / protocol / port.
 // Returns the response based on the provided "request".
-func pokeEndpoint(namespace, clientContainer, protocol, targetHost string, targetPort int32, request string) string {
-	ipPort := net.JoinHostPort("localhost", "80")
-	cmd := []string{containerRuntime, "exec", clientContainer}
-	if len(namespace) != 0 {
-		// command is to be run inside a pod, not containerRuntime
-		cmd = []string{"exec", clientContainer, "--"}
-	}
-
+func pokeEndpointViaExternalContainer(externalContainer infraapi.ExternalContainer, protocol, targetHost string, targetPort int32, request string) string {
+	ipPort := net.JoinHostPort("localhost", externalContainer.GetPortStr())
 	// we leverage the dial command from netexec, that is already supporting multiple protocols
 	curlCommand := strings.Split(fmt.Sprintf("curl -g -q -s http://%s/dial?request=%s&protocol=%s&host=%s&port=%d&tries=1",
 		ipPort,
@@ -327,16 +323,10 @@ func pokeEndpoint(namespace, clientContainer, protocol, targetHost string, targe
 		protocol,
 		targetHost,
 		targetPort), " ")
-
-	cmd = append(cmd, curlCommand...)
 	var res string
 	var err error
-	if len(namespace) != 0 {
-		res, err = e2ekubectl.RunKubectl(namespace, cmd...)
-	} else {
-		// command is to be run inside runtime container
-		res, err = runCommand(cmd...)
-	}
+	// command is to be run inside runtime container
+	res, err = infraprovider.Get().ExecExternalContainerCommand(externalContainer, curlCommand)
 	framework.ExpectNoError(err, "failed to run command on external container")
 	response, err := parseNetexecResponse(res)
 	if err != nil {
@@ -345,17 +335,54 @@ func pokeEndpoint(namespace, clientContainer, protocol, targetHost string, targe
 		return ""
 	}
 	framework.ExpectNoError(err)
+	return response
+}
 
+// pokeEndpointViaPod returns the response based on the provided "request" which is executed from the pod podName.
+func pokeEndpointViaPod(f *framework.Framework, namespace, podName, targetHost string, targetPort uint16, request string) string {
+	ipPort := net.JoinHostPort(targetHost, fmt.Sprintf("%d", targetPort))
+	curlCommand := fmt.Sprintf("curl -g -q -s http://%s/%s",
+		ipPort,
+		request)
+	stdOut, stdErr, err := e2epod.ExecShellInPodWithFullOutput(context.Background(), f, podName, curlCommand)
+	framework.ExpectNoError(err, "failed to run command within pod")
+	if stdErr != "" {
+		framework.Failf("failed to run command within pod %s/%s, stdout: %q, stderr: %q", namespace, podName, stdOut, stdErr)
+	}
+	return stdOut
+}
+
+// pokeEndpointViaNode leverages a k8 node running the netexec command to send a "request" to a target running
+// netexec on the given target host / protocol / port.
+// Returns the response based on the provided "request".
+func pokeEndpointViaNode(nodeName, protocol, targetHost string, localPort, targetPort uint16, request string) string {
+	ipPort := net.JoinHostPort("localhost", fmt.Sprintf("%d", localPort))
+	// we leverage the dial command from netexec, that is already supporting multiple protocols
+	curlCommand := []string{"curl", "-g", "-q", "-s", fmt.Sprintf("http://%s/dial?request=%s&protocol=%s&host=%s&port=%d&tries=1",
+		ipPort,
+		request,
+		protocol,
+		targetHost,
+		targetPort)}
+	res, err := infraprovider.Get().ExecK8NodeCommand(nodeName, curlCommand)
+	framework.ExpectNoError(err, "failed to run command within pod")
+	response, err := parseNetexecResponse(res)
+	if err != nil {
+		framework.Logf("FAILED Command was %s", curlCommand)
+		framework.Logf("FAILED Response was %v", res)
+		return ""
+	}
+	framework.ExpectNoError(err)
 	return response
 }
 
 // wrapper logic around pokeEndpoint
 // contact the ExternalIP service until each endpoint returns its hostname and return true, or false otherwise
-func pokeExternalIpService(clientContainerName, protocol, externalAddress string, externalPort int32, maxTries int, nodesHostnames sets.String) bool {
+func pokeExternalIpService(externalContainer infraapi.ExternalContainer, protocol, externalAddress string, externalPort int32, maxTries int, nodesHostnames sets.String) bool {
 	responses := sets.NewString()
 
 	for i := 0; i < maxTries; i++ {
-		epHostname := pokeEndpoint("", clientContainerName, protocol, externalAddress, externalPort, "hostname")
+		epHostname := pokeEndpointViaExternalContainer(externalContainer, protocol, externalAddress, externalPort, "hostname")
 		responses.Insert(epHostname)
 
 		// each endpoint returns its hostname. By doing this, we validate that each ep was reached at least once.
@@ -370,8 +397,7 @@ func pokeExternalIpService(clientContainerName, protocol, externalAddress string
 // run a few iterations to make sure that the hwaddr is stable
 // we will always run iterations + 1 in the loop to make sure that we have values
 // to compare
-func isNeighborEntryStable(clientContainer, targetHost string, iterations int) bool {
-	cmd := []string{containerRuntime, "exec", clientContainer}
+func isNeighborEntryStable(externalContainer infraapi.ExternalContainer, targetHost string, iterations int) bool {
 	var hwAddrOld string
 	var hwAddrNew string
 	// used for reporting only
@@ -381,14 +407,16 @@ func isNeighborEntryStable(clientContainer, targetHost string, iterations int) b
 	// make sure that we do not get Operation not permitted for neighbor entry deletion,
 	// ignore everything else for the delete and the ping
 	// RTNETLINK answers: Operation not permitted would indicate missing Cap NET_ADMIN
+	primaryInfName := infraprovider.Get().ExternalContainerPrimaryInterfaceName()
 	script := fmt.Sprintf(
-		"OUTPUT=$(ip neigh del %s dev eth0 2>&1); "+
+		"OUTPUT=$(ip neigh del %s dev %s 2>&1); "+
 			"if [[ \"$OUTPUT\" =~ \"Operation not permitted\" ]]; then "+
 			"echo \"$OUTPUT\";"+
 			"else "+
 			"ping -c1 -W1 %s &>/dev/null; ip -j neigh; "+
 			"fi",
 		targetHost,
+		primaryInfName,
 		targetHost,
 	)
 	command := []string{
@@ -396,12 +424,11 @@ func isNeighborEntryStable(clientContainer, targetHost string, iterations int) b
 		"-c",
 		script,
 	}
-	cmd = append(cmd, command...)
 
 	// run this for time of iterations + 1 to make sure that the entry is stable
 	for i := 0; i <= iterations; i++ {
 		// run the command
-		output, err := runCommand(cmd...)
+		output, err := infraprovider.Get().ExecExternalContainerCommand(externalContainer, command)
 		if err != nil {
 			framework.ExpectNoError(
 				fmt.Errorf("FAILED Command was: %s\nFAILED Response was: %v\nERROR is: %s",
@@ -455,24 +482,15 @@ func isNeighborEntryStable(clientContainer, targetHost string, iterations int) b
 	return true
 }
 
-// curlInContainer leverages a container running the netexec command to send a request to a target running
-// netexec on the given target host / protocol / port.
+// wgetInExternalContainer issues a request to target host and port at endpoint.
 // Returns a pair of either result, nil or "", error in case of an error.
-func curlInContainer(clientContainer, targetHost string, targetPort int32, endPoint string, maxTime int) (string, error) {
-	cmd := []string{containerRuntime, "exec", clientContainer}
+func wgetInExternalContainer(externalContainer infraapi.ExternalContainer, targetHost string, targetPort int32, endPoint string) (string, error) {
 	if utilnet.IsIPv6String(targetHost) {
 		targetHost = fmt.Sprintf("[%s]", targetHost)
 	}
-
-	// we leverage the dial command from netexec, that is already supporting multiple protocols
-	curlCommand := strings.Split(fmt.Sprintf("curl --max-time %d http://%s:%d/%s",
-		maxTime,
-		targetHost,
-		targetPort,
-		endPoint), " ")
-
-	cmd = append(cmd, curlCommand...)
-	return runCommand(cmd...)
+	return infraprovider.Get().ExecExternalContainerCommand(externalContainer, []string{
+		"wget", fmt.Sprintf("http://%s:%d/%s", targetHost, targetPort, endPoint), "-O", "/dev/null",
+	})
 }
 
 // parseNetexecResponse parses a json string of type '{"responses":"...", "errors":""}'.
@@ -573,35 +591,6 @@ func getNodeStatus(node string) string {
 	return status
 }
 
-// Returns the container's ipv4 and ipv6 addresses IN ORDER
-// related to the given network.
-func getContainerAddressesForNetwork(container, network string) (string, string) {
-	ipv4Format := fmt.Sprintf("{{.NetworkSettings.Networks.%s.IPAddress}}", network)
-	ipv6Format := fmt.Sprintf("{{.NetworkSettings.Networks.%s.GlobalIPv6Address}}", network)
-
-	ipv4, err := runCommand(containerRuntime, "inspect", "-f", ipv4Format, container)
-	if err != nil {
-		framework.Failf("failed to inspect external test container for its IPv4: %v", err)
-	}
-	ipv6, err := runCommand(containerRuntime, "inspect", "-f", ipv6Format, container)
-	if err != nil {
-		framework.Failf("failed to inspect external test container for its IPv4: %v", err)
-	}
-	return strings.TrimSuffix(ipv4, "\n"), strings.TrimSuffix(ipv6, "\n")
-}
-
-// Returns the container's MAC addresses
-// related to the given network.
-func getMACAddressesForNetwork(container, network string) string {
-	mac := fmt.Sprintf("{{.NetworkSettings.Networks.%s.MacAddress}}", network)
-
-	macAddr, err := runCommand(containerRuntime, "inspect", "-f", mac, container)
-	if err != nil {
-		framework.Failf("failed to inspect external test container for its MAC: %v", err)
-	}
-	return strings.TrimSuffix(macAddr, "\n")
-}
-
 // waitClusterHealthy ensures we have a given number of ovn-k worker and master nodes,
 // as well as all nodes are healthy
 func waitClusterHealthy(f *framework.Framework, numControlPlanePods int, controlPlanePodName string) error {
@@ -626,7 +615,7 @@ func waitClusterHealthy(f *framework.Framework, numControlPlanePods int, control
 			return false, nil
 		}
 
-		podClient := f.ClientSet.CoreV1().Pods(ovnNamespace)
+		podClient := f.ClientSet.CoreV1().Pods(deploymentconfig.Get().OVNKubernetesNamespace())
 		// Ensure all nodes are running and healthy
 		podList, err := podClient.List(context.Background(), metav1.ListOptions{
 			LabelSelector: "app=ovnkube-node",
@@ -668,11 +657,14 @@ func waitClusterHealthy(f *framework.Framework, numControlPlanePods int, control
 	})
 }
 
-// waitForRollout waits for the daemon set in a given namespace to be
+// updateAndWaitForRollout waits for the resource in a given namespace to be
 // successfully rolled out following an update.
 //
+// The updateFunc parameter is a callback that performs the update operation
+// (e.g., applying a new configuration).
+//
 // If allowedNotReadyNodes is -1, this method returns immediately without waiting.
-func waitForRollout(c clientset.Interface, ns string, resource string, allowedNotReadyNodes int32, timeout time.Duration) error {
+func updateAndWaitForRollout(c kubernetes.Interface, ns string, resource string, allowedNotReadyNodes int32, timeout time.Duration, updateFunc func()) error {
 	if allowedNotReadyNodes == -1 {
 		return nil
 	}
@@ -684,8 +676,25 @@ func waitForRollout(c clientset.Interface, ns string, resource string, allowedNo
 	resourceType := resourceAtoms[0]
 	resourceName := resourceAtoms[1]
 
+	var oldGeneration int64
+	switch resourceType {
+	case "daemonset", "daemonsets", "ds":
+		ds, err := c.AppsV1().DaemonSets(ns).Get(context.TODO(), resourceName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		oldGeneration = ds.Generation
+	case "deployment", "deployments", "deploy":
+		dp, err := c.AppsV1().Deployments(ns).Get(context.TODO(), resourceName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		oldGeneration = dp.Generation
+	}
+	updateFunc()
+
 	start := time.Now()
-	framework.Logf("Waiting up to %v for daemonset %s in namespace %s to update",
+	framework.Logf("Waiting up to %v for %s in namespace %s to update",
 		timeout, resource, ns)
 
 	return wait.Poll(framework.Poll, timeout, func() (bool, error) {
@@ -721,6 +730,10 @@ func waitForRollout(c clientset.Interface, ns string, resource string, allowedNo
 		}
 
 		if generation <= observedGeneration {
+			if generation <= oldGeneration {
+				framework.Logf("Waiting for %s generation to increase (currently %d)...", resource, generation)
+				return false, nil
+			}
 			if updated < desired {
 				framework.Logf("Waiting for %s rollout to finish: %d out of %d new pods have been updated (%d seconds elapsed)", resource,
 					updated, desired, int(time.Since(start).Seconds()))
@@ -817,7 +830,7 @@ func ExecCommandInContainerWithFullOutput(f *framework.Framework, namespace, pod
 
 func assertACLLogs(targetNodeName string, policyNameRegex string, expectedACLVerdict string, expectedACLSeverity string) (bool, error) {
 	framework.Logf("collecting the ovn-controller logs for node: %s", targetNodeName)
-	targetNodeLog, err := runCommand([]string{containerRuntime, "exec", targetNodeName, "grep", "acl_log", ovnControllerLogPath}...)
+	targetNodeLog, err := infraprovider.Get().ExecK8NodeCommand(targetNodeName, []string{"grep", "acl_log", ovnControllerLogPath})
 	if err != nil {
 		return false, fmt.Errorf("error accessing logs in node %s: %v", targetNodeName, err)
 	}
@@ -835,6 +848,71 @@ func assertACLLogs(targetNodeName string, policyNameRegex string, expectedACLVer
 		}
 	}
 	return false, nil
+}
+
+// getExternalContainerInterfaceIPsOnNetwork returns the IPv4 and IPv6 addresses (if any)
+// of the given external container on the specified provider network.
+func getExternalContainerInterfaceIPsOnNetwork(containerName, networkName string) (string, string, error) {
+	netw, err := infraprovider.Get().GetNetwork(networkName)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to get provider network %q: %w", networkName, err)
+	}
+	ni, err := infraprovider.Get().GetExternalContainerNetworkInterface(
+		infraapi.ExternalContainer{Name: containerName},
+		netw,
+	)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to get network interface for container %q on network %q: %w", containerName, netw.Name(), err)
+	}
+	return ni.IPv4, ni.IPv6, nil
+}
+
+// getExternalContainerInterfaceIPs returns IPv4 and IPv6 addresses configured
+// on the given interface inside the given external container. This is useful
+// for manually-configured interfaces like VLAN interfaces.
+func getExternalContainerInterfaceIPs(containerName, ifaceName string) ([]string, []string, error) {
+	container := infraapi.ExternalContainer{Name: containerName}
+
+	// Replicates the relevant fields from the json output by "ip -j addr show"
+	type addrInfo struct {
+		Family string `json:"family"`
+		Local  string `json:"local"`
+		Scope  string `json:"scope"`
+	}
+	type ipAddrJSON struct {
+		AddrInfo []addrInfo `json:"addr_info"`
+	}
+
+	out, err := infraprovider.Get().ExecExternalContainerCommand(
+		container, []string{"ip", "-j", "addr", "show", "dev", ifaceName})
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to exec on container %q: %w", containerName, err)
+	}
+	var parsed []ipAddrJSON
+	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+		return nil, nil, fmt.Errorf("failed to parse ip -j output: %w", err)
+	}
+
+	var v4, v6 []string
+	for _, entry := range parsed {
+		for _, ai := range entry.AddrInfo {
+			if ai.Local == "" {
+				continue
+			}
+			// Skip link-local/host-scoped addresses
+			if ai.Scope == "link" || ai.Scope == "host" {
+				continue
+			}
+			switch ai.Family {
+			case "inet":
+				v4 = append(v4, ai.Local)
+			case "inet6":
+				v6 = append(v6, ai.Local)
+			}
+		}
+	}
+
+	return v4, v6, nil
 }
 
 // patchServiceStringValue patches service serviceName in namespace serviceNamespace with provided string value.
@@ -884,20 +962,19 @@ func patchService(c kubernetes.Interface, serviceName, serviceNamespace, jsonPat
 	return nil
 }
 
-// pokeIPTableRules returns the number of iptables (both ipv6 and ipv4) rules that match the provided pattern
-func pokeIPTableRules(clientContainer, pattern string) int {
-	cmd := []string{containerRuntime, "exec", clientContainer}
-
-	ipv4Cmd := append(cmd, strings.Split("iptables-save -c", " ")...)
-	ipt4Rules, err := runCommand(ipv4Cmd...)
-	framework.ExpectNoError(err, "failed to get iptables rules from node %s", clientContainer)
-
-	ipv6Cmd := append(cmd, strings.Split("ip6tables-save -c", " ")...)
-	ipt6Rules, err := runCommand(ipv6Cmd...)
-	framework.ExpectNoError(err, "failed to get ip6tables rules from node %s", clientContainer)
-
+func getNodeIPTRules(nodeName string) string {
+	ipt4Rules, err := infraprovider.Get().ExecK8NodeCommand(nodeName, []string{"iptables-save", "-c"})
+	framework.ExpectNoError(err, "failed to get iptables rules from node %s", nodeName)
+	ipt6Rules, err := infraprovider.Get().ExecK8NodeCommand(nodeName, []string{"ip6tables-save", "-c"})
+	framework.ExpectNoError(err, "failed to get ip6tables rules from node %s", nodeName)
 	iptRules := ipt4Rules + ipt6Rules
 	framework.Logf("DEBUG: Dumping IPTRules %v", iptRules)
+	return iptRules
+}
+
+// pokeNodeIPTableRules returns the number of iptables (both ipv6 and ipv4) rules that match the provided pattern
+func pokeNodeIPTableRules(nodeName, pattern string) int {
+	iptRules := getNodeIPTRules(nodeName)
 	numOfMatchRules := 0
 	for _, iptRule := range strings.Split(iptRules, "\n") {
 		match := strings.Contains(iptRule, pattern)
@@ -909,15 +986,59 @@ func pokeIPTableRules(clientContainer, pattern string) int {
 	return numOfMatchRules
 }
 
-// countNFTablesElements returns the number of nftables elements in the indicated set
-// of the "ovn-kubernetes" table.
-func countNFTablesElements(clientContainer, name string) int {
-	cmd := []string{containerRuntime, "exec", clientContainer}
+func countIPTablesRulesMatches(nodeName string, patterns []string) int {
+	numMatches := 0
+	iptRules := getNodeIPTRules(nodeName)
+	for _, pattern := range patterns {
+		for _, iptRule := range strings.Split(iptRules, "\n") {
+			matched, err := regexp.MatchString(pattern, iptRule)
+			if err == nil && matched {
+				numMatches++
+			}
+		}
+	}
+	return numMatches
+}
 
-	nftCmd := append(cmd, "nft", "-j", "list", "set", "inet", "ovn-kubernetes", name)
-	nftElements, err := runCommand(nftCmd...)
-	framework.ExpectNoError(err, "failed to get nftables elements from node %s", clientContainer)
+type Elem []string
 
+func (e *Elem) UnmarshalJSON(data []byte) error {
+	var str string
+	var i int
+	var concatenation map[string][]json.RawMessage
+	if err := json.Unmarshal(data, &str); err == nil {
+		*e = []string{str}
+		return nil
+	}
+	if err := json.Unmarshal(data, &i); err == nil {
+		*e = []string{fmt.Sprintf("%d", i)}
+		return nil
+	}
+	if err := json.Unmarshal(data, &concatenation); err == nil {
+		concat := concatenation["concat"]
+		for _, rawMsg := range concat {
+			var str string
+			var i int
+			if err := json.Unmarshal(rawMsg, &str); err == nil {
+				*e = append(*e, str)
+			}
+			if err := json.Unmarshal(rawMsg, &i); err == nil {
+				*e = append(*e, fmt.Sprintf("%d", i))
+			}
+		}
+		return nil
+	}
+	return fmt.Errorf("could not unmarshal %s", string(data))
+}
+
+func getNFTablesElements(nodeName, name string) ([]Elem, error) {
+	array := []Elem{}
+
+	nftCmd := []string{"nft", "-j", "list", "set", "inet", "ovn-kubernetes", name}
+	nftElements, err := infraprovider.Get().ExecK8NodeCommand(nodeName, nftCmd)
+	if err != nil {
+		return array, err
+	}
 	framework.Logf("DEBUG: Dumping NFTElements %v", nftElements)
 	// The output will look like
 	//
@@ -940,23 +1061,84 @@ func countNFTablesElements(clientContainer, name string) int {
 	// }
 	//
 	// (Where the "elem" element will be omitted if the set is empty.)
-	// We just parse this optimistically and catch the panic if it fails.
-	count := -1
-	defer func() {
-		if recover() != nil {
-			framework.Logf("JSON parsing error!")
-		}
-	}()
 
-	jsonResult := map[string][]map[string]map[string]any{}
-	json.Unmarshal([]byte(nftElements), &jsonResult)
+	jsonResult := map[string][]map[string]map[string]json.RawMessage{}
+	if err := json.Unmarshal([]byte(nftElements), &jsonResult); err != nil {
+		return array, err
+	}
 	elem := jsonResult["nftables"][1]["set"]["elem"]
 	if elem == nil {
-		return 0
+		return array, err
 	}
-	elemArray := elem.([]any)
-	count = len(elemArray)
-	return count
+	err = json.Unmarshal(elem, &array)
+	return array, err
+}
+
+// countNFTablesElements returns the number of nftables elements in the indicated set
+// of the "ovn-kubernetes" table.
+func countNFTablesElements(nodeName, name string) int {
+	defer ginkgo.GinkgoRecover()
+	array, err := getNFTablesElements(nodeName, name)
+	framework.ExpectNoError(err, "failed to get nftables elements from node %s", nodeName)
+	return len(array)
+}
+
+func countNFTablesRulesMatches(nodeName, name string, sets [][]string) int {
+	numMatches := 0
+	array, err := getNFTablesElements(nodeName, name)
+	framework.ExpectNoError(err, "failed to get nftables elements from node %s", nodeName)
+	for _, set := range sets {
+		for _, elem := range array {
+			if slices.Equal(set, elem) {
+				numMatches++
+			}
+		}
+	}
+	return numMatches
+}
+
+func checkNumberOfETPRules(backendNodeName string, value int, pattern string) wait.ConditionFunc {
+	return func() (bool, error) {
+		numberOfETPRules := pokeNodeIPTableRules(backendNodeName, pattern)
+		isExpected := numberOfETPRules == value
+		if !isExpected {
+			framework.Logf("numberOfETPRules got: %d, expected: %d", numberOfETPRules, value)
+		}
+		return isExpected, nil
+	}
+}
+func checkNumberOfNFTElements(backendNodeName string, value int, name string) wait.ConditionFunc {
+	return func() (bool, error) {
+		numberOfNFTElements := countNFTablesElements(backendNodeName, name)
+		isExpected := numberOfNFTElements == value
+		if !isExpected {
+			framework.Logf("numberOfNFTElements got: %d, expected: %d", numberOfNFTElements, value)
+		}
+		return isExpected, nil
+	}
+}
+
+func checkIPTablesRulesPresent(backendNodeName string, patterns []string) wait.ConditionFunc {
+	return func() (bool, error) {
+		numMatches := countIPTablesRulesMatches(backendNodeName, patterns)
+		isExpected := numMatches == len(patterns)
+		if !isExpected {
+			framework.Logf("checkIPTablesRulesPresent got: numMatches: %d, expected: %d",
+				numMatches, len(patterns))
+		}
+		return isExpected, nil
+	}
+}
+func checkNFTElementsPresent(backendNodeName, name string, sets [][]string) wait.ConditionFunc {
+	return func() (bool, error) {
+		numMatches := countNFTablesRulesMatches(backendNodeName, name, sets)
+		isExpected := numMatches == len(sets)
+		if !isExpected {
+			framework.Logf("checkNFTElementsPresent got: numMatches: %d, expected: %d",
+				numMatches, len(sets))
+		}
+		return isExpected, nil
+	}
 }
 
 // isDualStackCluster returns 'true' if at least one of the nodes has more than one node subnet.
@@ -980,14 +1162,37 @@ func isDualStackCluster(nodes *v1.NodeList) bool {
 // used to inject OVN specific test actions
 func wrappedTestFramework(basename string) *framework.Framework {
 	f := newPrivelegedTestFramework(basename)
-	// inject dumping dbs on failure
 	ginkgo.JustAfterEach(func() {
-		if !ginkgo.CurrentSpecReport().Failed() {
+		logLocation := "/var/log"
+		coredumpDir := "/tmp/kind/logs/coredumps"
+		dbLocation := "/var/lib/openvswitch"
+		// https://github.com/ovn-kubernetes/ovn-kubernetes/issues/5782
+		skippedCoredumps := []string{"zebra", "bgpd", "mgmtd", "bfdd"}
+
+		// Check for coredumps on host
+		var coredumpFiles []string
+		files, err := os.ReadDir(coredumpDir)
+		if err == nil {
+			for _, file := range files {
+				if file.IsDir() {
+					continue
+				}
+				fileName := file.Name()
+				if slices.ContainsFunc(skippedCoredumps, func(s string) bool {
+					return strings.Contains(fileName, s)
+				}) {
+					framework.Logf("Ignoring coredump for skipped process: %s", fileName)
+					continue
+				}
+				coredumpFiles = append(coredumpFiles, fileName)
+			}
+		}
+
+		// If coredumps found OR test already failed, collect dbs
+		if len(coredumpFiles) == 0 && !ginkgo.CurrentSpecReport().Failed() {
 			return
 		}
 
-		logLocation := "/var/log"
-		dbLocation := "/var/lib/openvswitch"
 		// Potential database locations
 		ovsdbLocations := []string{"/etc/origin/openvswitch", "/etc/openvswitch"}
 		dbs := []string{"ovnnb_db.db", "ovnsb_db.db"}
@@ -995,43 +1200,40 @@ func wrappedTestFramework(basename string) *framework.Framework {
 
 		testName := strings.Replace(ginkgo.CurrentSpecReport().LeafNodeText, " ", "_", -1)
 		logDir := fmt.Sprintf("%s/e2e-dbs/%s-%s", logLocation, testName, f.UniqueName)
-
-		var args []string
-
 		// grab all OVS and OVN dbs
 		nodes, err := f.ClientSet.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
 		framework.ExpectNoError(err)
 		for _, node := range nodes.Items {
 			// ensure e2e-dbs directory with test case exists
-			args = []string{containerRuntime, "exec", node.Name, "mkdir", "-p", logDir}
-			_, err = runCommand(args...)
+			_, err = infraprovider.Get().ExecK8NodeCommand(node.Name, []string{"mkdir", "-p", logDir})
 			framework.ExpectNoError(err)
 
 			// Loop through potential OVSDB db locations
 			for _, ovsdbLocation := range ovsdbLocations {
-				args = []string{containerRuntime, "exec", node.Name, "stat", fmt.Sprintf("%s/%s", ovsdbLocation, ovsdb)}
-				_, err = runCommand(args...)
+				_, err = infraprovider.Get().ExecK8NodeCommand(node.Name, []string{"stat", fmt.Sprintf("%s/%s", ovsdbLocation, ovsdb)})
 				if err == nil {
 					// node name is the same in kapi and docker
-					args = []string{containerRuntime, "exec", node.Name, "cp", "-f", fmt.Sprintf("%s/%s", ovsdbLocation, ovsdb),
-						fmt.Sprintf("%s/%s", logDir, fmt.Sprintf("%s-%s", node.Name, ovsdb))}
-					_, err = runCommand(args...)
+					_, err = infraprovider.Get().ExecK8NodeCommand(node.Name, []string{"cp", "-f", fmt.Sprintf("%s/%s", ovsdbLocation, ovsdb),
+						fmt.Sprintf("%s/%s", logDir, fmt.Sprintf("%s-%s", node.Name, ovsdb))})
 					framework.ExpectNoError(err)
 					break // Stop the loop: the file is found and copied successfully
 				}
 			}
 
 			// IC will have dbs on every node, but legacy mode wont, check if they exist
-			args = []string{containerRuntime, "exec", node.Name, "stat", fmt.Sprintf("%s/%s", dbLocation, dbs[0])}
-			_, err = runCommand(args...)
+			_, err = infraprovider.Get().ExecK8NodeCommand(node.Name, []string{"stat", fmt.Sprintf("%s/%s", dbLocation, dbs[0])})
 			if err == nil {
 				for _, db := range dbs {
-					args = []string{containerRuntime, "exec", node.Name, "cp", "-f", fmt.Sprintf("%s/%s", dbLocation, db),
-						fmt.Sprintf("%s/%s", logDir, db)}
-					_, err = runCommand(args...)
-					framework.ExpectNoError(err)
+					_, err = infraprovider.Get().ExecK8NodeCommand(node.Name, []string{"cp", "-f", fmt.Sprintf("%s/%s", dbLocation, db),
+						fmt.Sprintf("%s/%s", logDir, db)})
+					framework.ExpectNoError(err, "copy DBs to file location must succeed")
 				}
 			}
+		}
+
+		// Abort testing if any coredump found
+		if len(coredumpFiles) != 0 {
+			ginkgo.AbortSuite(fmt.Sprintf("Coredumps found during test execution: %s", strings.Join(coredumpFiles, ", ")))
 		}
 	})
 
@@ -1041,6 +1243,7 @@ func wrappedTestFramework(basename string) *framework.Framework {
 func newPrivelegedTestFramework(basename string) *framework.Framework {
 	f := framework.NewDefaultFramework(basename)
 	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
+	f.NamespacePodSecurityWarnLevel = admissionapi.LevelPrivileged
 	f.DumpAllNamespaceInfo = func(ctx context.Context, f *framework.Framework, namespace string) {
 		debug.DumpAllNamespaceInfo(context.TODO(), f.ClientSet, namespace)
 	}
@@ -1054,7 +1257,7 @@ func countACLLogs(targetNodeName string, policyNameRegex string, expectedACLVerd
 	count := 0
 
 	framework.Logf("collecting the ovn-controller logs for node: %s", targetNodeName)
-	targetNodeLog, err := runCommand([]string{containerRuntime, "exec", targetNodeName, "cat", ovnControllerLogPath}...)
+	targetNodeLog, err := infraprovider.Get().ExecK8NodeCommand(targetNodeName, []string{"cat", ovnControllerLogPath})
 	if err != nil {
 		return 0, fmt.Errorf("error accessing logs in node %s: %v", targetNodeName, err)
 	}
@@ -1083,7 +1286,7 @@ func countACLLogs(targetNodeName string, policyNameRegex string, expectedACLVerd
 func getTemplateContainerEnv(namespace, resource, container, key string) string {
 	args := []string{"get", resource,
 		"-o=jsonpath='{.spec.template.spec.containers[?(@.name==\"" + container + "\")].env[?(@.name==\"" + key + "\")].value}'"}
-	value := e2ekubectl.RunKubectlOrDie(ovnNamespace, args...)
+	value := e2ekubectl.RunKubectlOrDie(namespace, args...)
 	return strings.Trim(value, "'")
 }
 
@@ -1093,17 +1296,30 @@ func setUnsetTemplateContainerEnv(c kubernetes.Interface, namespace, resource, c
 	args := []string{"set", "env", resource, "-c", container}
 	env := make([]string, 0, len(set)+len(unset))
 	for k, v := range set {
-		env = append(env, fmt.Sprintf("%s=%s", k, v))
+		currentValue := getTemplateContainerEnv(namespace, resource, container, k)
+		if currentValue != v {
+			env = append(env, fmt.Sprintf("%s=%s", k, v))
+		}
 	}
 	for _, k := range unset {
-		env = append(env, fmt.Sprintf("%s-", k))
+		currentValue := getTemplateContainerEnv(namespace, resource, container, k)
+		if currentValue != "" {
+			env = append(env, fmt.Sprintf("%s-", k))
+		}
 	}
+
+	if len(env) == 0 {
+		framework.Logf("No environment changes needed for %s container %s in namespace %s, skipping update", resource, container, namespace)
+		return
+	}
+
 	framework.Logf("Setting environment in %s container %s of namespace %s to %v", resource, container, namespace, env)
-	e2ekubectl.RunKubectlOrDie(namespace, append(args, env...)...)
 
 	// Make sure the change has rolled out
 	// TODO (Change this to use the exported upstream function)
-	err := waitForRollout(c, namespace, resource, 0, rolloutTimeout)
+	err := updateAndWaitForRollout(c, namespace, resource, 0, rolloutTimeout, func() {
+		e2ekubectl.RunKubectlOrDie(namespace, append(args, env...)...)
+	})
 	framework.ExpectNoError(err)
 }
 
@@ -1124,21 +1340,17 @@ func allowOrDropNodeInputTrafficOnPort(op, nodeName, protocol, port string) {
 }
 
 func updateIPTablesRulesForNode(op, nodeName string, ipTablesArgs []string, ipv6 bool) {
-	args := []string{"get", "pods", "--selector=app=ovnkube-node", "--field-selector", fmt.Sprintf("spec.nodeName=%s", nodeName), "-o", "jsonpath={.items..metadata.name}"}
-	ovnKubePodName := e2ekubectl.RunKubectlOrDie(ovnNamespace, args...)
 	iptables := "iptables"
 	if ipv6 {
 		iptables = "ip6tables"
 	}
-
-	args = []string{"exec", ovnKubePodName, "-c", getNodeContainerName(), "--", iptables, "--check"}
-	_, err := e2ekubectl.RunKubectl(ovnNamespace, append(args, ipTablesArgs...)...)
+	_, err := infraprovider.Get().ExecK8NodeCommand(nodeName, append([]string{iptables, "-v", "--check"}, ipTablesArgs...))
 	// errors known to be equivalent to not found
 	notFound1 := "No chain/target/match by that name"
 	notFound2 := "does a matching rule exist in that chain?"
 	notFound := err != nil && (strings.Contains(err.Error(), notFound1) || strings.Contains(err.Error(), notFound2))
 	if err != nil && !notFound {
-		framework.Failf("failed to check existance of %s rule on node %s: %v", iptables, nodeName, err)
+		framework.Failf("failed to check existence of %s rule on node %s: %v", iptables, nodeName, err)
 	}
 	if op == "delete" && notFound {
 		// rule is not there
@@ -1147,9 +1359,12 @@ func updateIPTablesRulesForNode(op, nodeName string, ipTablesArgs []string, ipv6
 		// rule is already there
 		return
 	}
-	args = []string{"exec", ovnKubePodName, "-c", getNodeContainerName(), "--", iptables, "--" + op}
 	framework.Logf("%s %s rule: %q on node %s", op, iptables, strings.Join(ipTablesArgs, ","), nodeName)
-	e2ekubectl.RunKubectlOrDie(ovnNamespace, append(args, ipTablesArgs...)...)
+	args := []string{iptables, "--" + op}
+	_, err = infraprovider.Get().ExecK8NodeCommand(nodeName, append(args, ipTablesArgs...))
+	if err != nil {
+		framework.Failf("failed to update %s rule on node %s: %v", iptables, nodeName, err)
+	}
 }
 
 func randStr(n int) string {
@@ -1162,14 +1377,52 @@ func randStr(n int) string {
 	return string(b)
 }
 
-func isIPv4Supported() bool {
-	val, present := os.LookupEnv("KIND_IPV4_SUPPORT")
-	return present && val == "true"
+func isCIDRIPFamilySupported(cs kubernetes.Interface, cidr string) bool {
+	ginkgo.GinkgoHelper()
+	gomega.Expect(cidr).To(gomega.ContainSubstring("/"))
+	// if cidr in format 2010:100:200::0/60/64, trim to 2010:100:200::0/60
+	if tokens := strings.Split(cidr, "/"); len(tokens) == 3 {
+		cidr = fmt.Sprintf(`%s/%s`, tokens[0], tokens[1])
+	}
+	isIPv6 := utilnet.IsIPv6CIDRString(cidr)
+	return (isIPv4Supported(cs) && !isIPv6) || (isIPv6Supported(cs) && isIPv6)
 }
 
-func isIPv6Supported() bool {
-	val, present := os.LookupEnv("KIND_IPV6_SUPPORT")
-	return present && val == "true"
+func isIPFamilySupported(cs clientset.Interface, cidr string) bool {
+	ginkgo.GinkgoHelper()
+	isIPv6 := utilnet.IsIPv6String(cidr)
+	return (isIPv4Supported(cs) && !isIPv6) || (isIPv6Supported(cs) && isIPv6)
+}
+
+func isIPv4Supported(cs kubernetes.Interface) bool {
+	v4, _ := getSupportedIPFamilies(cs)
+	return v4
+}
+
+func isIPv6Supported(cs kubernetes.Interface) bool {
+	_, v6 := getSupportedIPFamilies(cs)
+	return v6
+}
+
+func getSupportedIPFamilies(cs kubernetes.Interface) (bool, bool) {
+	n, err := e2enode.GetRandomReadySchedulableNode(context.TODO(), cs)
+	framework.ExpectNoError(err, "must fetch a Ready Node")
+	v4NodeAddrs := e2enode.GetAddressesByTypeAndFamily(n, v1.NodeInternalIP, v1.IPv4Protocol)
+	v6NodeAddrs := e2enode.GetAddressesByTypeAndFamily(n, v1.NodeInternalIP, v1.IPv6Protocol)
+	return len(v4NodeAddrs) > 0, len(v6NodeAddrs) > 0
+}
+
+func getSupportedIPFamiliesSlice(cs kubernetes.Interface) []utilnet.IPFamily {
+	v4, v6 := getSupportedIPFamilies(cs)
+	switch {
+	case v4 && v6:
+		return []utilnet.IPFamily{utilnet.IPv4, utilnet.IPv6}
+	case v4:
+		return []utilnet.IPFamily{utilnet.IPv4}
+	case v6:
+		return []utilnet.IPFamily{utilnet.IPv6}
+	}
+	return nil
 }
 
 func isInterconnectEnabled() bool {
@@ -1177,8 +1430,8 @@ func isInterconnectEnabled() bool {
 	return present && val == "true"
 }
 
-func isUDNHostIsolationDisabled() bool {
-	val, present := os.LookupEnv("DISABLE_UDN_HOST_ISOLATION")
+func isDynamicUDNEnabled() bool {
+	val, present := os.LookupEnv("DYNAMIC_UDN_ALLOCATION")
 	return present && val == "true"
 }
 
@@ -1187,15 +1440,32 @@ func isNetworkSegmentationEnabled() bool {
 	return present && val == "true"
 }
 
+func isICMPNetworkPolicyBypassEnabled() bool {
+	ovnKubeNamespace := deploymentconfig.Get().OVNKubernetesNamespace()
+	val := getTemplateContainerEnv(ovnKubeNamespace, "daemonset/ovnkube-node", getNodeContainerName(), "OVN_ALLOW_ICMP_NETPOL")
+	return val == "true"
+}
+
 func isLocalGWModeEnabled() bool {
 	val, present := os.LookupEnv("OVN_GATEWAY_MODE")
 	return present && val == "local"
 }
 
+func isHelmEnabled() bool {
+	val, present := os.LookupEnv("USE_HELM")
+	return present && val == "true"
+}
+
+func isPreConfiguredUdnAddressesEnabled() bool {
+	ovnKubeNamespace := deploymentconfig.Get().OVNKubernetesNamespace()
+	val := getTemplateContainerEnv(ovnKubeNamespace, "daemonset/ovnkube-node", getNodeContainerName(), "OVN_PRE_CONF_UDN_ADDR_ENABLE")
+	return val == "true"
+}
+
 func singleNodePerZone() bool {
 	if singleNodePerZoneResult == nil {
 		args := []string{"get", "pods", "--selector=app=ovnkube-node", "-o", "jsonpath={.items[0].spec.containers[*].name}"}
-		containerNames := e2ekubectl.RunKubectlOrDie(ovnNamespace, args...)
+		containerNames := e2ekubectl.RunKubectlOrDie(deploymentconfig.Get().OVNKubernetesNamespace(), args...)
 		result := true
 		for _, containerName := range strings.Split(containerNames, " ") {
 			if containerName == "ovnkube-node" {
@@ -1244,19 +1514,17 @@ func routeToNode(nodeName string, ips []string, mtu int, add bool) error {
 	}
 	for _, ip := range ips {
 		mask := 32
-		ipCmd := []string{"ip"}
+		cmd := []string{"ip"}
 		if utilnet.IsIPv6String(ip) {
 			mask = 128
-			ipCmd = []string{"ip", "-6"}
+			cmd = []string{"ip", "-6"}
 		}
 		var err error
-		cmd := []string{"docker", "exec", nodeName}
-		cmd = append(cmd, ipCmd...)
-		cmd = append(cmd, "route", ipOp, fmt.Sprintf("%s/%d", ip, mask), "dev", "breth0")
+		cmd = append(cmd, "route", ipOp, fmt.Sprintf("%s/%d", ip, mask), "dev", deploymentconfig.Get().ExternalBridgeName())
 		if mtu != 0 {
 			cmd = append(cmd, "mtu", strconv.Itoa(mtu))
 		}
-		_, err = runCommand(cmd...)
+		_, err = infraprovider.Get().ExecK8NodeCommand(nodeName, cmd)
 		if err != nil {
 			return err
 		}
@@ -1264,11 +1532,49 @@ func routeToNode(nodeName string, ips []string, mtu int, add bool) error {
 	return nil
 }
 
+// GetNodeIPv6LinkLocalAddressForEth0 returns the IPv6 link-local address for eth0 interface
+func GetNodeIPv6LinkLocalAddressForEth0(nodeName string) (string, error) {
+	// Command to get IPv6 link-local address for eth0
+	ipCmd := []string{"ip", "-6", "addr", "show", "dev", "eth0", "scope", "link"}
+	output, err := infraprovider.Get().ExecK8NodeCommand(nodeName, ipCmd)
+	if err != nil {
+		return "", fmt.Errorf("failed to get link-local address for eth0: %v", err)
+	}
+
+	// Parse the output to extract the fe80:: address
+	lines := strings.Split(string(output), "\n")
+
+	for _, line := range lines {
+		if strings.Contains(line, "inet6") {
+			// Extract just the address
+			parts := strings.Fields(line)
+			for _, part := range parts {
+				if strings.Contains(part, "/") {
+					// This looks like an IP address with prefix
+					addrWithPrefix := part
+					addrParts := strings.Split(addrWithPrefix, "/")
+					if len(addrParts) > 0 {
+						ipStr := addrParts[0]
+						ip := net.ParseIP(ipStr)
+
+						// Check if it's a valid IPv6 address and is link-local
+						if ip != nil && ip.To4() == nil && ip.IsLinkLocalUnicast() {
+							return ipStr, nil
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return "", fmt.Errorf("no IPv6 link-local address found for eth0 on node %s", nodeName)
+}
+
 // CaptureContainerOutput captures output of a container according to the
 // right-most match of the provided regex. Returns a map of subexpression name
 // to subexpression capture. A zero string name `""` maps to the full expression
 // capture.
-func CaptureContainerOutput(ctx context.Context, c clientset.Interface, namespace, pod, container, regexpr string) (map[string]string, error) {
+func CaptureContainerOutput(ctx context.Context, c kubernetes.Interface, namespace, pod, container, regexpr string) (map[string]string, error) {
 	regex, err := regexp.Compile(regexpr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compile regexp %q: %w", regexpr, err)
@@ -1319,7 +1625,7 @@ func getGatewayMTUSupport(node *v1.Node) bool {
 }
 
 func isKernelModuleLoaded(nodeName, kernelModuleName string) bool {
-	out, err := runCommand(containerRuntime, "exec", nodeName, "lsmod")
+	out, err := infraprovider.Get().ExecK8NodeCommand(nodeName, []string{"lsmod"})
 	if err != nil {
 		framework.Failf("failed to list kernel modules for node %s: %v", nodeName, err)
 	}
@@ -1339,9 +1645,71 @@ func matchIPv6StringFamily(ipStrings []string) (string, error) {
 	return util.MatchIPStringFamily(true /*ipv6*/, ipStrings)
 }
 
+func matchCIDRStringsByIPFamilySet(cidrs []string, ipFamilySet sets.Set[utilnet.IPFamily]) []string {
+	var r []string
+	for _, cidr := range cidrs {
+		if ipFamilySet.Has(utilnet.IPFamilyOfCIDRString(cidr)) {
+			r = append(r, cidr)
+		}
+	}
+	return r
+}
+
+func matchIPStringsByIPFamilySet(ips []string, ipFamilySet sets.Set[utilnet.IPFamily]) []string {
+	var r []string
+	for _, ip := range ips {
+		if ipFamilySet.Has(utilnet.IPFamilyOfString(ip)) {
+			r = append(r, ip)
+		}
+	}
+	return r
+}
+
+func splitCIDRStringsByIPFamily(cidrs []string) (ipv4 []string, ipv6 []string) {
+	for _, cidr := range cidrs {
+		switch {
+		case utilnet.IsIPv4CIDRString(cidr):
+			ipv4 = append(ipv4, cidr)
+		case utilnet.IsIPv6CIDRString(cidr):
+			ipv6 = append(ipv6, cidr)
+		}
+	}
+	return
+}
+
+func splitIPStringsByIPFamily(ips []string) (ipv4 []string, ipv6 []string) {
+	for _, ip := range ips {
+		switch {
+		case utilnet.IsIPv4String(ip):
+			ipv4 = append(ipv4, ip)
+		case utilnet.IsIPv6String(ip):
+			ipv6 = append(ipv6, ip)
+		}
+	}
+	return
+}
+
+func getFirstCIDROfFamily(family utilnet.IPFamily, ipnets []*net.IPNet) *net.IPNet {
+	for _, ipnet := range ipnets {
+		if utilnet.IPFamilyOfCIDR(ipnet) == family {
+			return ipnet
+		}
+	}
+	return nil
+}
+
+func getFirstIPStringOfFamily(family utilnet.IPFamily, ips []string) string {
+	for _, ip := range ips {
+		if utilnet.IPFamilyOfString(ip) == family {
+			return ip
+		}
+	}
+	return ""
+}
+
 // This is a replacement for e2epod.DeletePodWithWait(), which does not handle pods that
 // may be automatically restarted (https://issues.k8s.io/126785)
-func deletePodWithWait(ctx context.Context, c clientset.Interface, pod *v1.Pod) error {
+func deletePodWithWait(ctx context.Context, c kubernetes.Interface, pod *v1.Pod) error {
 	if pod == nil {
 		return nil
 	}
@@ -1369,7 +1737,7 @@ func deletePodWithWait(ctx context.Context, c clientset.Interface, pod *v1.Pod) 
 
 // This is a replacement for e2epod.DeletePodWithWaitByName(), which does not handle pods
 // that may be automatically restarted (https://issues.k8s.io/126785)
-func deletePodWithWaitByName(ctx context.Context, c clientset.Interface, podName, podNamespace string) error {
+func deletePodWithWaitByName(ctx context.Context, c kubernetes.Interface, podName, podNamespace string) error {
 	pod, err := c.CoreV1().Pods(podNamespace).Get(ctx, podName, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
@@ -1387,19 +1755,329 @@ func deletePodWithWaitByName(ctx context.Context, c clientset.Interface, podName
 
 // This is an alternative version of e2epod.WaitForPodNotFoundInNamespace(), which takes
 // a UID as well.
-func waitForPodNotFoundInNamespace(ctx context.Context, c clientset.Interface, podName, ns string, uid types.UID, timeout time.Duration) error {
-        err := framework.Gomega().Eventually(ctx, framework.HandleRetry(func(ctx context.Context) (*v1.Pod, error) {
-                pod, err := c.CoreV1().Pods(ns).Get(ctx, podName, metav1.GetOptions{})
-                if apierrors.IsNotFound(err) {
-                        return nil, nil
-                }
+func waitForPodNotFoundInNamespace(ctx context.Context, c kubernetes.Interface, podName, ns string, uid types.UID, timeout time.Duration) error {
+	err := framework.Gomega().Eventually(ctx, framework.HandleRetry(func(ctx context.Context) (*v1.Pod, error) {
+		pod, err := c.CoreV1().Pods(ns).Get(ctx, podName, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
 		if pod != nil && pod.UID != uid {
 			return nil, nil
 		}
-                return pod, err
-        })).WithTimeout(timeout).Should(gomega.BeNil())
-        if err != nil {
-                return fmt.Errorf("expected pod to not be found: %w", err)
-        }
-        return nil
+		return pod, err
+	})).WithTimeout(timeout).Should(gomega.BeNil())
+	if err != nil {
+		return fmt.Errorf("expected pod to not be found: %w", err)
+	}
+	return nil
 }
+
+func isDefaultNetworkAdvertised() bool {
+	podNetworkValue, err := e2ekubectl.RunKubectl("default", "get", "ra", "default", "--template={{index .spec.advertisements 0}}")
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(podNetworkValue)) == "PodNetwork"
+}
+
+// getAgnHostHTTPPortBindFullCMD returns the full command for agnhost netexec server. Args must not be defined in Container spec.
+func getAgnHostHTTPPortBindFullCMD(port uint16) []string {
+	return append([]string{"/agnhost"}, getAgnHostHTTPPortBindCMDArgs(port)...)
+}
+
+// getAgnHostHTTPPortBindCMDArgs returns the aruments for /agnhost binary
+func getAgnHostHTTPPortBindCMDArgs(port uint16) []string {
+	return []string{"netexec", fmt.Sprintf("--http-port=%d", port)}
+}
+
+// executeFileTemplate executes `name` template from the provided `templates`
+// using `data`as input and writes the results to `directory/name`
+func executeFileTemplate(templates *template.Template, directory, name string, data any) error {
+	f, err := os.OpenFile(filepath.Join(directory, name), os.O_WRONLY|os.O_CREATE, 0666)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	err = templates.ExecuteTemplate(f, name, data)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func isDNSNameResolverEnabled() bool {
+	val, present := os.LookupEnv("OVN_ENABLE_DNSNAMERESOLVER")
+	return present && val == "true"
+}
+
+// Given a node name, returns the host subnets (IPv4/IPv6) of the node primary interface
+// as annotated by OVN-Kubernetes. The returned slice may contain zero, one, or two CIDRs.
+func getHostSubnetsForNode(cs clientset.Interface, nodeName string) ([]string, error) {
+	node, err := cs.CoreV1().Nodes().Get(context.Background(), nodeName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get node %s: %v", nodeName, err)
+	}
+	nodeIfAddr, err := util.GetNodeIfAddrAnnotation(node)
+	if err != nil {
+		return nil, err
+	}
+	hostSubnets := []string{}
+	if nodeIfAddr.IPv4 != "" {
+		ip, ipNet, err := net.ParseCIDR(nodeIfAddr.IPv4)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse IPv4 address %s: %v", nodeIfAddr.IPv4, err)
+		}
+		ipNet.IP = ip.Mask(ipNet.Mask)
+		hostSubnets = append(hostSubnets, ipNet.String())
+	}
+	if nodeIfAddr.IPv6 != "" {
+		ip, ipNet, err := net.ParseCIDR(nodeIfAddr.IPv6)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse IPv6 address %s: %v", nodeIfAddr.IPv6, err)
+		}
+		ipNet.IP = ip.Mask(ipNet.Mask)
+		hostSubnets = append(hostSubnets, ipNet.String())
+	}
+	return hostSubnets, nil
+}
+
+// normalizeIP removes CIDR notation from an IP address if present and validates/normalizes the IP format.
+// For example, "10.0.0.2/24" becomes "10.0.0.2".
+func normalizeIP(s string) (string, error) {
+	if s == "" {
+		return s, nil
+	}
+	if p, err := netip.ParsePrefix(s); err == nil {
+		return p.Addr().String(), nil
+	}
+	if a, err := netip.ParseAddr(s); err == nil {
+		return a.String(), nil
+	}
+	return "", fmt.Errorf("invalid IP address: %s", s)
+}
+
+func normalizeIPAddresses(ips []string) ([]string, error) {
+	normalized := make([]string, len(ips))
+	for i, ip := range ips {
+		normalizedIP, err := normalizeIP(ip)
+		if err != nil {
+			return nil, fmt.Errorf("failed to normalize IP addresses: %w", err)
+		}
+		normalized[i] = normalizedIP
+	}
+	return normalized, nil
+}
+
+// getNetworkInterfaceName extracts the interface name from a pod's network-status annotation
+// If the pod is host-networked, it returns eth0.
+// If the pod has attachments, it finds the interface for the specified network
+// If the pod has no attachments, it returns the default network interface
+func getNetworkInterfaceName(pod *v1.Pod, podConfig podConfiguration, netConfigName string) (string, error) {
+	var predicate func(nadapi.NetworkStatus) bool
+	if podConfig.hostNetwork {
+		return "eth0", nil
+	}
+	if len(podConfig.attachments) > 0 {
+		// Pod has attachments - find the specific network interface
+		expectedNetworkName := fmt.Sprintf("%s/%s", podConfig.namespace, netConfigName)
+		predicate = func(status nadapi.NetworkStatus) bool {
+			return status.Name == expectedNetworkName
+		}
+	} else {
+		// Pod has no attachments - find the default network interface
+		predicate = func(status nadapi.NetworkStatus) bool {
+			return status.Name == "ovn-kubernetes" || status.Default
+		}
+	}
+	networkStatuses, err := podNetworkStatus(pod, predicate)
+	if err != nil {
+		return "", fmt.Errorf("failed to get network status from pod %s/%s: %w", pod.Namespace, pod.Name, err)
+	}
+	if len(networkStatuses) == 0 {
+		if len(podConfig.attachments) > 0 {
+			return "", fmt.Errorf("no network interface found for network %s/%s", podConfig.namespace, netConfigName)
+		}
+		return "", fmt.Errorf("no default network interface found")
+	}
+	if len(networkStatuses) > 1 {
+		return "", fmt.Errorf("multiple network interfaces found matching criteria")
+	}
+	iface := networkStatuses[0].Interface
+	// Multus may omit Interface for the default network; default to eth0.
+	if iface == "" && len(podConfig.attachments) == 0 {
+		return "eth0", nil
+	}
+	return iface, nil
+}
+
+// findOVNDBLeaderPod finds the ovnkube-db pod that is currently the northbound database leader
+func findOVNDBLeaderPod(f *framework.Framework, cs clientset.Interface, namespace string) (*v1.Pod, error) {
+	dbPods, err := cs.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{LabelSelector: "ovn-db-pod=true"})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list ovnkube-db pods: %v", err)
+	}
+
+	if len(dbPods.Items) == 0 {
+		return nil, fmt.Errorf("no ovnkube-db pods found")
+	}
+
+	if len(dbPods.Items) == 1 {
+		return &dbPods.Items[0], nil
+	}
+
+	for i := range dbPods.Items {
+		pod := &dbPods.Items[i]
+		if pod.Status.Phase != v1.PodRunning {
+			continue
+		}
+
+		stdout, stderr, err := ExecCommandInContainerWithFullOutput(f, namespace, pod.Name, "nb-ovsdb",
+			"ovsdb-client", "query", "unix:/var/run/openvswitch/ovnnb_db.sock",
+			`["_Server", {"op":"select", "table":"Database", "where":[["name", "==", "OVN_Northbound"]], "columns": ["leader"]}]`)
+
+		if err != nil {
+			framework.Logf("Warning: Failed to query leader status on pod %s: %v, stderr: %s", pod.Name, err, stderr)
+			continue
+		}
+
+		// Parse the JSON response to check if this pod is the leader
+		// Expected: [{"rows":[{"leader":true}]}]
+		type dbResp struct {
+			Rows []struct {
+				Leader bool `json:"leader"`
+			} `json:"rows"`
+		}
+		var resp []dbResp
+		if err := json.Unmarshal([]byte(stdout), &resp); err == nil &&
+			len(resp) > 0 && len(resp[0].Rows) > 0 && resp[0].Rows[0].Leader {
+			framework.Logf("Found nbdb leader pod: %s", pod.Name)
+			return pod, nil
+		}
+	}
+
+	return nil, fmt.Errorf("no nbdb leader pod found among %d ovnkube-db pods", len(dbPods.Items))
+}
+
+// waitOVNKubernetesHealthy waits for the ovn-kubernetes cluster to be healthy
+// This includes checking that all nodes are ready, all ovnkube-node pods are running,
+// and all ovnkube-master/control-plane pods are running
+func waitOVNKubernetesHealthy(f *framework.Framework) error {
+	return wait.PollImmediate(5*time.Second, 300*time.Second, func() (bool, error) {
+		// Check that all nodes are ready and schedulable
+		nodes, err := e2enode.GetReadySchedulableNodes(context.TODO(), f.ClientSet)
+		if err != nil {
+			framework.Logf("Error getting ready schedulable nodes: %v", err)
+			return false, nil
+		}
+
+		framework.Logf("Found %d ready schedulable nodes", len(nodes.Items))
+
+		// Check ovnkube-node pods
+		podClient := f.ClientSet.CoreV1().Pods(deploymentconfig.Get().OVNKubernetesNamespace())
+		ovnNodePods, err := podClient.List(context.Background(), metav1.ListOptions{
+			LabelSelector: "app=ovnkube-node",
+		})
+		if err != nil {
+			framework.Logf("Error listing ovnkube-node pods: %v", err)
+			return false, nil
+		}
+
+		expectedNodePods := len(nodes.Items)
+		if len(ovnNodePods.Items) != expectedNodePods {
+			framework.Logf("Expected %d ovnkube-node pods, found %d", expectedNodePods, len(ovnNodePods.Items))
+			return false, nil
+		}
+
+		// Check that all ovnkube-node pods are running and ready
+		for _, pod := range ovnNodePods.Items {
+			isReady, err := testutils.PodRunningReady(&pod)
+			if err != nil {
+				framework.Logf("Error checking if ovnkube-node pod %s is ready: %v", pod.Name, err)
+				return false, nil
+			}
+			if !isReady {
+				framework.Logf("ovnkube-node pod %s is not running and ready (phase: %s)", pod.Name, pod.Status.Phase)
+				return false, nil
+			}
+		}
+
+		// Check ovnkube-master/control-plane pods
+		ovnMasterPods, err := podClient.List(context.Background(), metav1.ListOptions{
+			LabelSelector: "name=ovnkube-master",
+		})
+		if err != nil {
+			framework.Logf("Error listing ovnkube-master pods: %v", err)
+			return false, nil
+		}
+
+		// If no ovnkube-master pods, check for ovnkube-control-plane
+		if len(ovnMasterPods.Items) == 0 {
+			ovnMasterPods, err = podClient.List(context.Background(), metav1.ListOptions{
+				LabelSelector: "name=ovnkube-control-plane",
+			})
+			if err != nil {
+				framework.Logf("Error listing ovnkube-control-plane pods: %v", err)
+				return false, nil
+			}
+		}
+
+		if len(ovnMasterPods.Items) == 0 {
+			framework.Logf("No ovnkube-master or ovnkube-control-plane pods found")
+			return false, nil
+		}
+
+		// Check that at least one master/control-plane pod is running and ready
+		runningMasterPods := 0
+		for _, pod := range ovnMasterPods.Items {
+			isReady, err := testutils.PodRunningReady(&pod)
+			if err != nil {
+				framework.Logf("Error checking if ovnkube-master pod %s is ready: %v", pod.Name, err)
+				continue
+			}
+			if isReady {
+				runningMasterPods++
+			}
+		}
+
+		if runningMasterPods == 0 {
+			framework.Logf("No ovnkube-master/control-plane pods are running")
+			return false, nil
+		}
+
+		framework.Logf("OVN-Kubernetes cluster is healthy: %d nodes, %d ovnkube-node pods, %d running master pods",
+			len(nodes.Items), len(ovnNodePods.Items), runningMasterPods)
+		return true, nil
+	})
+}
+
+// waitForNodeReadyState waits for the specified node to reach the desired Ready state within the given timeout
+func waitForNodeReadyState(f *framework.Framework, nodeName string, timeout time.Duration, desiredReady bool) {
+	var stateDescription, expectationMessage string
+	if desiredReady {
+		stateDescription = "Ready"
+		expectationMessage = "Node should become Ready after startup"
+	} else {
+		stateDescription = "NotReady"
+		expectationMessage = "Node should become NotReady after shutdown"
+	}
+
+	gomega.Eventually(func() bool {
+		node, err := f.ClientSet.CoreV1().Nodes().Get(context.Background(), nodeName, metav1.GetOptions{})
+		if err != nil {
+			framework.Logf("Error getting node %s: %v", nodeName, err)
+			return false
+		}
+
+		for _, condition := range node.Status.Conditions {
+			if condition.Type == v1.NodeReady {
+				isReady := condition.Status == v1.ConditionTrue
+				if isReady == desiredReady {
+					framework.Logf("Node %s is now %s", nodeName, stateDescription)
+					return true
+				}
+			}
+		}
+		return false
+	}, timeout, 10*time.Second).Should(gomega.BeTrue(), expectationMessage)
+}
+

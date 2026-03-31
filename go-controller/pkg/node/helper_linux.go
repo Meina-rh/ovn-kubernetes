@@ -11,7 +11,7 @@ import (
 
 	"k8s.io/klog/v2"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 type GatewayInterfaceMismatchError struct {
@@ -151,23 +151,6 @@ func getDefaultGatewayInterfaceByFamily(family int, gwIface string) (string, net
 		}
 	}
 	return "", net.IP{}, nil
-}
-
-func getIntfName(gatewayIntf string) (string, error) {
-	// The given (or autodetected) interface is an OVS bridge and this could be
-	// created by us using util.NicToBridge() or it was pre-created by the user.
-
-	// Is intfName a port of gatewayIntf?
-	intfName, err := util.GetNicName(gatewayIntf)
-	if err != nil {
-		return "", err
-	}
-	_, stderr, err := util.RunOVSVsctl("get", "interface", intfName, "ofport")
-	if err != nil {
-		return "", fmt.Errorf("failed to get ofport of %s, stderr: %q, error: %v",
-			intfName, stderr, err)
-	}
-	return intfName, nil
 }
 
 // filterRoutesByIfIndex is a helper function that will sieve the provided routes and check

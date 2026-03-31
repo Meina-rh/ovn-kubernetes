@@ -2,7 +2,7 @@
 
 -----------------------
 
-![Version: 1.0.0](https://img.shields.io/badge/Version-1.0.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: 1.0.0](https://img.shields.io/badge/AppVersion-1.0.0-informational?style=flat-square)
+![Version: 1.2.0](https://img.shields.io/badge/Version-1.2.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: 1.2.0](https://img.shields.io/badge/AppVersion-1.2.0-informational?style=flat-square)
 
 **Homepage:** <https://ovn-kubernetes.io/>
 
@@ -84,7 +84,7 @@ networking:
 - Optional: build local image and load it into Kind nodes
 ```
 # cd dist/images
-# make ubuntu
+# make ubuntu-image
 # docker tag ovn-kube-ubuntu:latest ghcr.io/ovn-kubernetes/ovn-kubernetes/ovn-kube-ubuntu:master
 # kind load docker-image ghcr.io/ovn-kubernetes/ovn-kubernetes/ovn-kube-ubuntu:master
 ```
@@ -139,15 +139,6 @@ false
 </pre>
 </td>
 			<td>Controls if forwarding is allowed on OVNK controlled interfaces</td>
-		</tr>
-		<tr>
-			<td>global.disableIfaceIdVer</td>
-			<td>bool</td>
-			<td><pre lang="json">
-false
-</pre>
-</td>
-			<td>Deprecated: iface-id-ver is always enabled</td>
 		</tr>
 		<tr>
 			<td>global.disablePacketMtuCheck</td>
@@ -332,6 +323,24 @@ false
 </pre>
 </td>
 			<td>Configure to use multiple NetworkAttachmentDefinition CRD feature with ovn-kubernetes</td>
+		</tr>
+		<tr>
+			<td>global.enableNetworkSegmentation</td>
+			<td>bool</td>
+			<td><pre lang="json">
+false
+</pre>
+</td>
+			<td>Configure to use user defined networks (UDN) feature with ovn-kubernetes</td>
+		</tr>
+		<tr>
+			<td>global.enableNetworkQos</td>
+			<td>string</td>
+			<td><pre lang="json">
+""
+</pre>
+</td>
+			<td>Enables network QoS support from/to pods</td>
 		</tr>
 		<tr>
 			<td>global.enableMulticast</td>

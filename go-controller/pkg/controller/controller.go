@@ -14,8 +14,8 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 const (
@@ -27,6 +27,7 @@ const (
 // to reconcile through its Reconcile method
 type Reconciler interface {
 	Reconcile(key string)
+	ReconcileRateLimited(key string)
 	ReconcileAfter(key string, duration time.Duration)
 	addHandler() error
 	startWorkers() error
@@ -254,7 +255,7 @@ func (c *controller[T]) processNextQueueItem() bool {
 	if err != nil {
 		retry := c.config.MaxAttempts == InfiniteAttempts || c.queue.NumRequeues(key) < c.config.MaxAttempts
 		if retry {
-			klog.Infof("Controller %s: error found while processing %s: %v", c.name, key, err)
+			klog.Errorf("Controller %s: error found while processing %s: %v", c.name, key, err)
 			c.queue.AddRateLimited(key)
 			return true
 		}
@@ -270,6 +271,10 @@ func (c *controller[T]) processNextQueueItem() bool {
 
 func (c *controller[T]) Reconcile(key string) {
 	c.queue.Add(key)
+}
+
+func (c *controller[T]) ReconcileRateLimited(key string) {
+	c.queue.AddRateLimited(key)
 }
 
 func (c *controller[T]) ReconcileAfter(key string, duration time.Duration) {

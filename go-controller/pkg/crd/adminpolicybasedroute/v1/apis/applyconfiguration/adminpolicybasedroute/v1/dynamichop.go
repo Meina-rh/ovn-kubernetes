@@ -18,16 +18,26 @@ limitations under the License.
 package v1
 
 import (
-	v1 "k8s.io/client-go/applyconfigurations/meta/v1"
+	metav1 "k8s.io/client-go/applyconfigurations/meta/v1"
 )
 
 // DynamicHopApplyConfiguration represents a declarative configuration of the DynamicHop type for use
 // with apply.
+//
+// DynamicHop defines the configuration for a dynamic external gateway interface.
+// These interfaces are wrapped around a pod object that resides inside the cluster.
+// The field NetworkAttachmentName captures the name of the multus network name to use when retrieving the gateway IP to use.
+// The PodSelector and the NamespaceSelector are mandatory fields.
 type DynamicHopApplyConfiguration struct {
-	PodSelector           *v1.LabelSelectorApplyConfiguration `json:"podSelector,omitempty"`
-	NamespaceSelector     *v1.LabelSelectorApplyConfiguration `json:"namespaceSelector,omitempty"`
-	NetworkAttachmentName *string                             `json:"networkAttachmentName,omitempty"`
-	BFDEnabled            *bool                               `json:"bfdEnabled,omitempty"`
+	// PodSelector defines the selector to filter the pods that are external gateways.
+	PodSelector *metav1.LabelSelectorApplyConfiguration `json:"podSelector,omitempty"`
+	// NamespaceSelector defines a selector to filter the namespaces where the pod gateways are located.
+	NamespaceSelector *metav1.LabelSelectorApplyConfiguration `json:"namespaceSelector,omitempty"`
+	// NetworkAttachmentName determines the multus network name to use when retrieving the pod IPs that will be used as the gateway IP.
+	// When this field is empty, the logic assumes that the pod is configured with HostNetwork and is using the node's IP as gateway.
+	NetworkAttachmentName *string `json:"networkAttachmentName,omitempty"`
+	// BFDEnabled determines if the interface implements the Bidirectional Forward Detection protocol. Defaults to false.
+	BFDEnabled *bool `json:"bfdEnabled,omitempty"`
 }
 
 // DynamicHopApplyConfiguration constructs a declarative configuration of the DynamicHop type for use with
@@ -39,7 +49,7 @@ func DynamicHop() *DynamicHopApplyConfiguration {
 // WithPodSelector sets the PodSelector field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the PodSelector field is set to the value of the last call.
-func (b *DynamicHopApplyConfiguration) WithPodSelector(value *v1.LabelSelectorApplyConfiguration) *DynamicHopApplyConfiguration {
+func (b *DynamicHopApplyConfiguration) WithPodSelector(value *metav1.LabelSelectorApplyConfiguration) *DynamicHopApplyConfiguration {
 	b.PodSelector = value
 	return b
 }
@@ -47,7 +57,7 @@ func (b *DynamicHopApplyConfiguration) WithPodSelector(value *v1.LabelSelectorAp
 // WithNamespaceSelector sets the NamespaceSelector field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the NamespaceSelector field is set to the value of the last call.
-func (b *DynamicHopApplyConfiguration) WithNamespaceSelector(value *v1.LabelSelectorApplyConfiguration) *DynamicHopApplyConfiguration {
+func (b *DynamicHopApplyConfiguration) WithNamespaceSelector(value *metav1.LabelSelectorApplyConfiguration) *DynamicHopApplyConfiguration {
 	b.NamespaceSelector = value
 	return b
 }

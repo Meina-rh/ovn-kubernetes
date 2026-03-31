@@ -14,13 +14,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/ip"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/ip/subnet"
-	ovncnitypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/cni/types"
-	ovnkclient "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
-	ovntest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing"
-	ovnktypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/ip"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/ip/subnet"
+	ovncnitypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/cni/types"
+	ovnkclient "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/kube"
+	ovntest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing"
+	ovnktypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -67,10 +67,10 @@ var _ = Describe("Persistent IP allocator operations", func() {
 			}
 
 			ipAllocator := subnet.NewAllocator()
-			Expect(ipAllocator.AddOrUpdateSubnet(subnetName, ovntest.MustParseIPNets("192.168.200.0/24", "fd10::/64"))).To(Succeed())
+			Expect(ipAllocator.AddOrUpdateSubnet(subnet.SubnetConfig{Name: subnetName, Subnets: ovntest.MustParseIPNets("192.168.200.0/24", "fd10::/64")})).To(Succeed())
 			namedAllocator = ipAllocator.ForSubnet(subnetName)
 			ipamClaimsReconciler = NewIPAMClaimReconciler(ovnkapiclient, netInfo, nil)
-			Expect(ipAllocator.AddOrUpdateSubnet(subnetName, ovntest.MustParseIPNets("192.168.200.0/24", "fd10::/64"))).To(Succeed())
+			Expect(ipAllocator.AddOrUpdateSubnet(subnet.SubnetConfig{Name: subnetName, Subnets: ovntest.MustParseIPNets("192.168.200.0/24", "fd10::/64")})).To(Succeed())
 		})
 
 		It("nothing to do when reconciling nil IPAMClaims", func() {
@@ -140,7 +140,7 @@ var _ = Describe("Persistent IP allocator operations", func() {
 					toRuntimeObj(originalClaims)...,
 				),
 			}
-			Expect(ipAllocator.AddOrUpdateSubnet(subnetName, ovntest.MustParseIPNets("192.168.200.0/24", "fd10::/64"))).To(Succeed())
+			Expect(ipAllocator.AddOrUpdateSubnet(subnet.SubnetConfig{Name: subnetName, Subnets: ovntest.MustParseIPNets("192.168.200.0/24", "fd10::/64")})).To(Succeed())
 			namedAllocator = ipAllocator.ForSubnet(subnetName)
 			ipamClaimsReconciler = NewIPAMClaimReconciler(ovnkapiclient, netInfo, nil)
 		})
@@ -166,7 +166,7 @@ var _ = Describe("Persistent IP allocator operations", func() {
 		BeforeEach(func() {
 			initialIPs = []string{"192.168.200.2/24", "fd10::1/64"}
 			ipAllocator := subnet.NewAllocator()
-			Expect(ipAllocator.AddOrUpdateSubnet(subnetName, ovntest.MustParseIPNets("192.168.200.0/24", "fd10::/64"))).To(Succeed())
+			Expect(ipAllocator.AddOrUpdateSubnet(subnet.SubnetConfig{Name: subnetName, Subnets: ovntest.MustParseIPNets("192.168.200.0/24", "fd10::/64")})).To(Succeed())
 			Expect(ipAllocator.AllocateIPPerSubnet(subnetName, ovntest.MustParseIPNets(initialIPs...))).To(Succeed())
 			namedAllocator = ipAllocator.ForSubnet(subnetName)
 

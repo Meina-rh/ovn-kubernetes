@@ -14,8 +14,8 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/utils/clock"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
 )
 
 var updateInterval time.Duration = 500 * time.Millisecond
@@ -127,9 +127,9 @@ func (phu *proxierHealthUpdater) Start(stopChan chan struct{}, wg *sync.WaitGrou
 			if errors.Is(err, http.ErrServerClosed) {
 				return
 			}
-			msg := fmt.Sprintf("serving healthz on %s failed: %v", phu.address, err)
-			phu.recorder.Eventf(phu.nodeRef, corev1.EventTypeWarning, "FailedToStartProxierHealthcheck", "StartOVNKubernetesNode", msg)
-			klog.Errorf(msg)
+			err = fmt.Errorf("serving healthz on %s failed: %v", phu.address, err)
+			phu.recorder.Eventf(phu.nodeRef, corev1.EventTypeWarning, "FailedToStartProxierHealthcheck", "StartOVNKubernetesNode", err.Error())
+			klog.Errorf("Error running proxy healthz server: %v", err)
 			time.Sleep(5 * time.Second)
 		}
 	}()

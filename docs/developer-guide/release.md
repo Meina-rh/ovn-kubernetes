@@ -15,17 +15,18 @@ Each new release of OVN-Kubernetes is defined with a "version" that represents t
     * `ovnkube-identity`: is the executable that is invoked to run ovn-kubernetes identity manager, which includes the admission webhook and the CertificateSigningRequest approver
 * `ovnkube` API configuration 
 * scripts used to deploy OVN-Kubernetes including helm charts
-* Images for [fedora](https://github.com/ovn-org/ovn-kubernetes/pkgs/container/ovn-kubernetes%2Fovn-kube-fedora) and [ubuntu](https://github.com/ovn-org/ovn-kubernetes/pkgs/container/ovn-kubernetes%2Fovn-kube-ubuntu)
+* Images for [fedora](https://github.com/ovn-kubernetes/ovn-kubernetes/pkgs/container/ovn-kubernetes%2Fovn-kube-fedora) and [ubuntu](https://github.com/ovn-kubernetes/ovn-kubernetes/pkgs/container/ovn-kubernetes%2Fovn-kube-ubuntu)
 
 ## Release Planning
 
-* OVN-Kubernetes projects uses [milestones](https://github.com/ovn-org/ovn-kubernetes/milestones) to track our release planning
+* OVN-Kubernetes projects uses [milestones](https://github.com/ovn-kubernetes/ovn-kubernetes/milestones) to track our release planning
 * All PRs and Issues must be tagged with the correct milestone so that it get's included in the release planning
-* Please check our [roadmap](https://github.com/orgs/ovn-org/projects/5/views/4) for more details on our release tracking process
+* Please check our [roadmap](https://github.com/orgs/ovn-kubernetes/projects/5/views/4) for more details on our release tracking process
 
 ## Release Cadence
 
-* We will do two major releases each year. Ex: 1.0.0 at June 2024 and 1.1.0 at Dec 2024
+* We will do three major releases each year. Ex: 1.x.0 in April 2026 and 1.y.0 in August 2026 and 1.z.0 in December 2026
+* The release timings have been fixed roughly to be 3 or so months after a major Kubernetes release (allowing time for that to stabilize and for us to consume that kube release before we cut our own release)
 * At a given time we will maintain only two active major releases
   (So when 1.2.0 is released we will stop maintaining and backporting fixes into 1.0.0)
 * For a supported major release we will continue to do backports for backfixes and offer
@@ -35,15 +36,21 @@ Each new release of OVN-Kubernetes is defined with a "version" that represents t
 
 ## Release Process
 
-* You can find our current releases [here](https://github.com/ovn-org/ovn-kubernetes/releases).
+* You can find our current releases [here](https://github.com/ovn-kubernetes/ovn-kubernetes/releases).
 * Every major release cut will be preceded by an alpha prerelease and beta prerelease.
-* See [sample release PR](https://github.com/ovn-org/ovn-kubernetes/pull/4333) which
+* See [sample release PR](https://github.com/ovn-kubernetes/ovn-kubernetes/pull/4333) which
   will become the head commit for a given release.
 * Branch will be cut on the day of release once the release PR merges.
-* CI-CD for the release branch will be added to the [GitHub Workflow](https://github.com/ovn-org/ovn-kubernetes/blob/master/.github/workflows/test.yml#L6).
+* CI-CD for the release branch will be added to the [GitHub Workflow](https://github.com/ovn-kubernetes/ovn-kubernetes/blob/master/.github/workflows/test.yml#L6).
 
 ## BackPort Request
 
 * If a PR needs to be backported to an older release that should be requested
   by adding the `needs-backport` label.
-* Reach out to the maintainers on slack or by tagging them directly on the PR.
+* Reach out to the maintainers on slack or by tagging them directly on the PR or come to the community meetings to discuss this.
+
+## Information on Past Releases
+
+* [v1.0.0](https://github.com/ovn-kubernetes/ovn-kubernetes/tree/release-1.0) - [release-notes](https://github.com/ovn-kubernetes/ovn-kubernetes/releases/tag/v1.0.0) - not maintained anymore.
+* [v1.1.0](https://github.com/ovn-kubernetes/ovn-kubernetes/tree/release-1.1) - [release-notes](https://github.com/ovn-kubernetes/ovn-kubernetes/releases/tag/v1.1.0) - actively maintained
+* [v1.2.0](https://github.com/ovn-kubernetes/ovn-kubernetes/tree/release-1.2) - [release-notes](https://github.com/ovn-kubernetes/ovn-kubernetes/releases/tag/v1.2.0) - actively maintained

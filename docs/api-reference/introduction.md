@@ -38,3 +38,6 @@ designed and implemented by OVN-Kubernetes
 * [EgressFirewall](https://ovn-kubernetes.io/api-reference/egress-firewall-api-spec/)
 * [AdminPolicyBasedExternalRoutes](https://ovn-kubernetes.io/api-reference/admin-epbr-api-spec/)
 * [UserDefinedNetwork](https://ovn-kubernetes.io/api-reference/userdefinednetwork-api-spec/)
+* [RouteAdvertisements](routeadvertisements-api-spec.md)
+* [VTEP](vtep-api-spec.md)
+* [ClusterNetworkConnect](clusternetworkconnect-api-spec.md)

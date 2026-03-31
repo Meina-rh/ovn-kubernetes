@@ -5,81 +5,21 @@ set -eo pipefail
 # Returns the full directory name of the script
 export DIR="$( cd -- "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 
-export OCI_BIN=${KIND_EXPERIMENTAL_PROVIDER:-docker}
-
-# Source the kind-common file from the same directory where this script is located
-source "${DIR}/kind-common"
+# Source the kind-common.sh file from the same directory where this script is located
+source "${DIR}/kind-common.sh"
 
 set_default_params() {
-
-  # Set default values
-  export KIND_CONFIG=${KIND_CONFIG:-}
-  export KIND_INSTALL_INGRESS=${KIND_INSTALL_INGRESS:-false}
-  export KIND_INSTALL_METALLB=${KIND_INSTALL_METALLB:-false}
-  export KIND_INSTALL_PLUGINS=${KIND_INSTALL_PLUGINS:-false}
-  export KIND_INSTALL_KUBEVIRT=${KIND_INSTALL_KUBEVIRT:-false}
-  export OVN_HA=${OVN_HA:-false}
-  export OVN_MULTICAST_ENABLE=${OVN_MULTICAST_ENABLE:-false}
-  export OVN_HYBRID_OVERLAY_ENABLE=${OVN_HYBRID_OVERLAY_ENABLE:-false}
-  export OVN_OBSERV_ENABLE=${OVN_OBSERV_ENABLE:-false}
-  export OVN_EMPTY_LB_EVENTS=${OVN_EMPTY_LB_EVENTS:-false}
-  export KIND_REMOVE_TAINT=${KIND_REMOVE_TAINT:-true}
-  export ENABLE_MULTI_NET=${ENABLE_MULTI_NET:-false}
-  export KIND_NUM_WORKER=${KIND_NUM_WORKER:-2}
-  export KIND_CLUSTER_NAME=${KIND_CLUSTER_NAME:-ovn}
-  export OVN_IMAGE=${OVN_IMAGE:-'ghcr.io/ovn-kubernetes/ovn-kubernetes/ovn-kube-ubuntu:helm'}
-
-  # Setup KUBECONFIG patch based on cluster-name
-  export KUBECONFIG=${KUBECONFIG:-${HOME}/${KIND_CLUSTER_NAME}.conf}
-
-  # Validated params that work
-  export MASQUERADE_SUBNET_IPV4=${MASQUERADE_SUBNET_IPV4:-169.254.0.0/17}
-  export MASQUERADE_SUBNET_IPV6=${MASQUERADE_SUBNET_IPV6:-fd69::/112}
-
-  # Input not currently validated. Modify outside script at your own risk.
-  # These are the same values defaulted to in KIND code (kind/default.go).
-  # NOTE: KIND NET_CIDR_IPV6 default use a /64 but OVN have a /64 per host
-  # so it needs to use a larger subnet
-  #  Upstream - NET_CIDR_IPV6=fd00:10:244::/64 SVC_CIDR_IPV6=fd00:10:96::/112
-  export NET_CIDR_IPV4=${NET_CIDR_IPV4:-10.244.0.0/16}
-  export NET_SECOND_CIDR_IPV4=${NET_SECOND_CIDR_IPV4:-172.19.0.0/16}
-  export SVC_CIDR_IPV4=${SVC_CIDR_IPV4:-10.96.0.0/16}
-  export NET_CIDR_IPV6=${NET_CIDR_IPV6:-fd00:10:244::/48}
-  export SVC_CIDR_IPV6=${SVC_CIDR_IPV6:-fd00:10:96::/112}
-  export JOIN_SUBNET_IPV4=${JOIN_SUBNET_IPV4:-100.64.0.0/16}
-  export JOIN_SUBNET_IPV6=${JOIN_SUBNET_IPV6:-fd98::/64}
-  export TRANSIT_SWITCH_SUBNET_IPV4=${TRANSIT_SWITCH_SUBNET_IPV4:-100.88.0.0/16}
-  export TRANSIT_SWITCH_SUBNET_IPV6=${TRANSIT_SWITCH_SUBNET_IPV6:-fd97::/64}
-  export METALLB_CLIENT_NET_SUBNET_IPV4=${METALLB_CLIENT_NET_SUBNET_IPV4:-172.22.0.0/16}
-  export METALLB_CLIENT_NET_SUBNET_IPV6=${METALLB_CLIENT_NET_SUBNET_IPV6:-fc00:f853:ccd:e792::/64}
-
-  export KIND_NUM_MASTER=1
-  if [ "$OVN_HA" == true ]; then
-    KIND_NUM_MASTER=3
-  fi
-
-  OVN_ENABLE_INTERCONNECT=${OVN_ENABLE_INTERCONNECT:-false}
-  if [ "$OVN_COMPACT_MODE" == true ] && [ "$OVN_ENABLE_INTERCONNECT" != false ]; then
-     echo "Compact mode cannot be used together with Interconnect"
-     exit 1
-  fi
-
-
-  if [ "$OVN_ENABLE_INTERCONNECT" == true ]; then
-    KIND_NUM_NODES_PER_ZONE=${KIND_NUM_NODES_PER_ZONE:-1}
-    TOTAL_NODES=$((KIND_NUM_WORKER + KIND_NUM_MASTER))
-    if [[ ${KIND_NUM_NODES_PER_ZONE} -gt 1 ]] && [[ $((TOTAL_NODES % KIND_NUM_NODES_PER_ZONE)) -ne 0 ]]; then
-      echo "(Total k8s nodes / number of nodes per zone) should be zero"
-      exit 1
-    fi
-  else
-    KIND_NUM_NODES_PER_ZONE=0
-  fi
+  set_common_default_params
 
   # Hard code ipv4 support until IPv6 is implemented
-  export KIND_IPV4_SUPPORT=true
-
-  export OVN_ENABLE_DNSNAMERESOLVER=${OVN_ENABLE_DNSNAMERESOLVER:-false}
+  if [ "$PLATFORM_IPV6_SUPPORT" == true ]; then
+    echo "kind-helm.sh does not support IPv6 yet"
+    exit 1
+  fi
+  if [ "$PLATFORM_IPV4_SUPPORT" != true ]; then
+    echo "kind-helm.sh only supports IPv4, must set PLATFORM_IPV4_SUPPORT to true "
+    exit 1
+  fi
 }
 
 usage() {
@@ -95,32 +35,68 @@ usage() {
     echo "       [ -pl  | --install-cni-plugins ]"
     echo "       [ -ikv | --install-kubevirt ]"
     echo "       [ -mne | --multi-network-enable ]"
+    echo "       [ -nse | --network-segmentation-enable ]"
+    echo "       [ -nce | --network-connect-enable ]"
+    echo "       [ -uae | --preconfigured-udn-addresses-enable ]"
+    echo "       [ -rae | --route-advertisements-enable ]"
+    echo "       [ -evpn | --evpn-enable ]"
+    echo "       [-dudn | --dynamic-udn-allocation]"
+    echo "       [-dug | --dynamic-udn-removal-grace-period]"
+    echo "       [-adv | --advertise-default-network]"
+    echo "       [-rud | --routed-udn-isolation-disable]"
+    echo "       [ -nqe | --network-qos-enable ]"
+    echo "       [ -noe | --no-overlay-enable [snat-enabled|managed] ]"
     echo "       [ -wk  | --num-workers <num> ]"
     echo "       [ -ic  | --enable-interconnect]"
     echo "       [ -npz | --node-per-zone ]"
+    echo "       [ -ov  | --ovn-image <image> ]"
+    echo "       [ -ovr | --ovn-repo <repo> ]"
+    echo "       [ -ovg | --ovn-gitref <ref> ]"
     echo "       [ -cn  | --cluster-name ]"
+    echo "       [ -mip | --metrics-ip <ip> ]"
+    echo "       [ -mtu <mtu> ]"
+    echo "       [ --enable-coredumps ]"
     echo "       [ -h ]"
     echo ""
-    echo "--delete                            Delete current cluster"
-    echo "-cf  | --config-file                Name of the KIND configuration file"
-    echo "-kt  | --keep-taint                 Do not remove taint components"
-    echo "                                    DEFAULT: Remove taint components"
-    echo "-me  | --multicast-enabled          Enable multicast. DEFAULT: Disabled"
-    echo "-ho  | --hybrid-enabled             Enable hybrid overlay. DEFAULT: Disabled"
-    echo "-obs | --observability              Enable observability. DEFAULT: Disabled"
-    echo "-el  | --ovn-empty-lb-events        Enable empty-lb-events generation for LB without backends. DEFAULT: Disabled"
-    echo "-ii  | --install-ingress            Flag to install Ingress Components."
-    echo "                                    DEFAULT: Don't install ingress components."
-    echo "-mlb | --install-metallb            Install metallb to test service type LoadBalancer deployments"
-    echo "-pl  | --install-cni-plugins        Install CNI plugins"
-    echo "-ikv | --install-kubevirt           Install kubevirt"
-    echo "-mne | --multi-network-enable       Enable multi networks. DEFAULT: Disabled"
-    echo "-ha  | --ha-enabled                 Enable high availability. DEFAULT: HA Disabled"
-    echo "-wk  | --num-workers                Number of worker nodes. DEFAULT: 2 workers"
-    echo "-cn  | --cluster-name               Configure the kind cluster's name"
-    echo "-dns | --enable-dnsnameresolver     Enable DNSNameResolver for resolving the DNS names used in the DNS rules of EgressFirewall."
-    echo "-ic  | --enable-interconnect        Enable interconnect with each node as a zone (only valid if OVN_HA is false)"
-    echo "-npz | --nodes-per-zone             Specify number of nodes per zone (Default 0, which means global zone; >0 means interconnect zone, where 1 for single-node zone, >1 for multi-node zone). If this value > 1, then (total k8s nodes (workers + 1) / num of nodes per zone) should be zero."
+    echo "--delete                                      Delete current cluster"
+    echo "-cf  | --config-file                          Name of the KIND configuration file"
+    echo "-kt  | --keep-taint                           Do not remove taint components"
+    echo "                                              DEFAULT: Remove taint components"
+    echo "-me  | --multicast-enabled                    Enable multicast. DEFAULT: Disabled"
+    echo "-ho  | --hybrid-enabled                       Enable hybrid overlay. DEFAULT: Disabled"
+    echo "-obs | --observability                        Enable observability. DEFAULT: Disabled"
+    echo "-el  | --ovn-empty-lb-events                  Enable empty-lb-events generation for LB without backends. DEFAULT: Disabled"
+    echo "-ii  | --install-ingress                      Flag to install Ingress Components."
+    echo "                                              DEFAULT: Don't install ingress components."
+    echo "-mlb | --install-metallb                      Install metallb to test service type LoadBalancer deployments"
+    echo "-pl  | --install-cni-plugins                  Install CNI plugins"
+    echo "-ikv | --install-kubevirt                     Install kubevirt"
+    echo "-mne | --multi-network-enable                 Enable multi networks. DEFAULT: Disabled"
+    echo "-nse | --network-segmentation-enable          Enable network segmentation. DEFAULT: Disabled"
+    echo "-nce | --network-connect-enable               Enable network connect (requires network segmentation). DEFAULT: Disabled"
+    echo "-uae | --preconfigured-udn-addresses-enable   Enable connecting workloads with preconfigured network to user-defined networks. DEFAULT: Disabled"
+    echo "-rae | --route-advertisements-enable          Enable route advertisements"
+    echo "-evpn | --evpn-enable                         Enable EVPN"
+    echo "-dudn | --dynamic-udn-allocation              Enable dynamic UDN allocation. DEFAULT: Disabled"
+    echo "-dug | --dynamic-udn-removal-grace-period     Configure the grace period in seconds for dynamic UDN removal. DEFAULT: 120 seconds"
+    echo "-adv | --advertise-default-network            Applies a RouteAdvertisements configuration to advertise the default network on all nodes"
+    echo "-rud | --routed-udn-isolation-disable         Disable isolation across BGP-advertised UDNs (sets advertised-udn-isolation-mode=loose). DEFAULT: strict."
+    echo "-nqe | --network-qos-enable                   Enable network QoS. DEFAULT: Disabled"
+    echo "-noe | --no-overlay-enable [snat-enabled|managed] Enable no overlay for the default network. Optional value: 'snat-enabled' to enable SNAT, 'managed' to enable SNAT and managed routing. DEFAULT: disabled."
+    echo "-ha  | --ha-enabled                           Enable high availability. DEFAULT: HA Disabled"
+    echo "-wk  | --num-workers                          Number of worker nodes. DEFAULT: 2 workers"
+    echo "-ov  | --ovn-image                            Use the specified docker image instead of building locally. DEFAULT: local build."
+    echo "-ovr | --ovn-repo                             Specify the repository to build OVN from"
+    echo "-ovg | --ovn-gitref                           Specify the branch, tag or commit id to build OVN from, it can be a pattern like 'branch-*' it will order results and use the first one"
+    echo "-cn  | --cluster-name                         Configure the kind cluster's name"
+    echo "-mip | --metrics-ip                           IP address to bind metrics endpoints. DEFAULT: K8S_NODE_IP or 0.0.0.0"
+    echo "-mtu                                          Define the overlay mtu. DEFAULT: 1400 (1500 for no-overlay mode)"
+    echo "--enable-coredumps                            Enable coredump collection on kind nodes. DEFAULT: Disabled"
+    echo "-dns | --enable-dnsnameresolver               Enable DNSNameResolver for resolving the DNS names used in the DNS rules of EgressFirewall."
+    echo "-ce  | --enable-central                       [DEPRECATED] Deploy with OVN Central (Legacy Architecture)"
+    echo "-npz | --nodes-per-zone                       Specify number of nodes per zone (Default 0, which means global zone; >0 means interconnect zone, where 1 for single-node zone, >1 for multi-node zone). If this value > 1, then (total k8s nodes (workers + 1) / num of nodes per zone) should be zero."
+    echo "-mps | --multi-pod-subnet                     Use multiple subnets for the default cluster network"
+    echo "--allow-icmp-netpol                           Allows ICMP and ICMPv6 traffic globally, regardless of network policy rules"
     echo ""
 
 }
@@ -128,70 +104,150 @@ usage() {
 parse_args() {
     while [ "$1" != "" ]; do
         case $1 in
-            --delete )                          delete
-                                                exit
-                                                ;;
-            -cf | --config-file )               shift
-                                                if test ! -f "$1"; then
-                                                    echo "$1 does not  exist"
+            --delete )                            delete
+                                                  exit
+                                                  ;;
+            -cf | --config-file )                 shift
+                                                  if test ! -f "$1"; then
+                                                      echo "$1 does not  exist"
+                                                      usage
+                                                      exit 1
+                                                  fi
+                                                  KIND_CONFIG=$1
+                                                  ;;
+            -kt | --keep-taint )                  KIND_REMOVE_TAINT=false
+                                                  ;;
+            -me | --multicast-enabled)            OVN_MULTICAST_ENABLE=true
+                                                  ;;
+            -ho | --hybrid-enabled )              OVN_HYBRID_OVERLAY_ENABLE=true
+                                                  ;;
+            -obs | --observability )              OVN_OBSERV_ENABLE=true
+                                                  ;;
+            -el | --ovn-empty-lb-events )         OVN_EMPTY_LB_EVENTS=true
+                                                  ;;
+            -ii | --install-ingress )             KIND_INSTALL_INGRESS=true
+                                                  ;;
+            -mlb | --install-metallb )            KIND_INSTALL_METALLB=true
+                                                  ;;
+            -pl | --install-cni-plugins )         KIND_INSTALL_PLUGINS=true
+                                                  ;;
+            -ikv | --install-kubevirt)            KIND_INSTALL_KUBEVIRT=true
+                                                  ;;
+            -mne | --multi-network-enable )       ENABLE_MULTI_NET=true
+                                                  ;;
+            -nse | --network-segmentation-enable) ENABLE_NETWORK_SEGMENTATION=true
+                                                  ;;
+            -nce | --network-connect-enable )     ENABLE_NETWORK_CONNECT=true
+                                                  ;;
+            -uae | --preconfigured-udn-addresses-enable)    ENABLE_PRE_CONF_UDN_ADDR=true
+                                                  ;;
+            -rae | --route-advertisements-enable) ENABLE_ROUTE_ADVERTISEMENTS=true
+                                                  ;;
+            -evpn | --evpn-enable)                ENABLE_EVPN=true
+                                                  ;;
+            -adv | --advertise-default-network)   ADVERTISE_DEFAULT_NETWORK=true
+                                                  ;;
+            -rud | --routed-udn-isolation-disable) ADVERTISED_UDN_ISOLATION_MODE=loose
+                                                  ;;
+            -dudn | --dynamic-udn-allocation)     DYNAMIC_UDN_ALLOCATION=true
+                                                  ;;
+            -dug  | --dynamic-udn-removal-grace-period) shift
+                                                  if [[ -z "${1:-}" || "${1:-}" == -* ]]; then
+                                                    echo "Missing value for --dynamic-udn-removal-grace-period" >&2
                                                     usage
                                                     exit 1
-                                                fi
-                                                KIND_CONFIG=$1
-                                                ;;
-            -kt | --keep-taint )                KIND_REMOVE_TAINT=false
-                                                ;;
-            -me | --multicast-enabled)          OVN_MULTICAST_ENABLE=true
-                                                ;;
-            -ho | --hybrid-enabled )            OVN_HYBRID_OVERLAY_ENABLE=true
-                                                ;;
-            -obs | --observability )            OVN_OBSERV_ENABLE=true
-                                                ;;
-            -el | --ovn-empty-lb-events )       OVN_EMPTY_LB_EVENTS=true
-                                                ;;
-            -ii | --install-ingress )           KIND_INSTALL_INGRESS=true
-                                                ;;
-            -mlb | --install-metallb )          KIND_INSTALL_METALLB=true
-                                                ;;
-            -pl | --install-cni-plugins )       KIND_INSTALL_PLUGINS=true
-                                                ;;
-            -ikv | --install-kubevirt)          KIND_INSTALL_KUBEVIRT=true
-                                                ;;
-            -mne | --multi-network-enable )     ENABLE_MULTI_NET=true
-                                                ;;
-            -ha | --ha-enabled )                OVN_HA=true
-                                                KIND_NUM_MASTER=3
-                                                ;;
-            -wk | --num-workers )               shift
-                                                if ! [[ "$1" =~ ^[0-9]+$ ]]; then
-                                                    echo "Invalid num-workers: $1"
-                                                    usage
-                                                    exit 1
-                                                fi
-                                                KIND_NUM_WORKER=$1
-                                                ;;
-            -cn | --cluster-name )              shift
-                                                KIND_CLUSTER_NAME=$1
-                                                # Setup KUBECONFIG
-                                                set_default_params
-                                                ;;
-            -dns | --enable-dnsnameresolver )   OVN_ENABLE_DNSNAMERESOLVER=true
-                                                ;;
-            -ic | --enable-interconnect )       OVN_ENABLE_INTERCONNECT=true
-                                                ;;
-            -npz | --nodes-per-zone )           shift
-                                                if ! [[ "$1" =~ ^[0-9]+$ ]]; then
-                                                    echo "Invalid num-nodes-per-zone: $1"
-                                                    usage
-                                                    exit 1
-                                                fi
-                                                KIND_NUM_NODES_PER_ZONE=$1
-                                                ;;
-            * )                                 usage
-                                                exit 1
+                                                  fi
+                                                  DYNAMIC_UDN_GRACE_PERIOD=$1
+                                                  if [[ "$DYNAMIC_UDN_GRACE_PERIOD" =~ ^[0-9]+$ ]]; then
+                                                    DYNAMIC_UDN_GRACE_PERIOD="${DYNAMIC_UDN_GRACE_PERIOD}s"
+                                                  fi
+                                                  ;;
+            -nqe | --network-qos-enable )         OVN_NETWORK_QOS_ENABLE=true
+                                                  ;;
+            -noe | --no-overlay-enable )          ENABLE_NO_OVERLAY=true
+                                                  # Check if next argument is a valid value
+                                                  if [[ -n "$2" && ! "$2" =~ ^- ]]; then
+                                                    if [[ "$2" == "snat-enabled" ]]; then
+                                                      ENABLE_NO_OVERLAY_OUTBOUND_SNAT=true
+                                                      shift  # consume the value argument
+                                                    elif [[ "$2" == "managed" ]]; then
+                                                      ENABLE_NO_OVERLAY_OUTBOUND_SNAT=true
+                                                      ENABLE_NO_OVERLAY_MANAGED_ROUTING=true
+                                                      shift  # consume the value argument
+                                                    else
+                                                      echo "Error: Invalid value for --no-overlay-enable: $2"
+                                                      echo "Valid values are: snat-enabled, managed"
+                                                      exit 1
+                                                    fi
+                                                  else
+                                                    ENABLE_NO_OVERLAY_OUTBOUND_SNAT=false
+                                                    ENABLE_NO_OVERLAY_MANAGED_ROUTING=false
+                                                  fi
+                                                  ;;
+            -ha | --ha-enabled )                  OVN_HA=true
+                                                  KIND_NUM_MASTER=3
+                                                  ;;
+            -wk | --num-workers )                 shift
+                                                  if ! [[ "$1" =~ ^[0-9]+$ ]]; then
+                                                      echo "Invalid num-workers: $1"
+                                                      usage
+                                                      exit 1
+                                                  fi
+                                                  KIND_NUM_WORKER=$1
+                                                  ;;
+            -ov | --ovn-image )                   shift
+                                                  OVN_IMAGE=$1
+                                                  ;;
+            -ovr | --ovn-repo )                   shift
+                                                  OVN_REPO=$1
+                                                  ;;
+            -ovg | --ovn-gitref )                 shift
+                                                  OVN_GITREF=$1
+                                                  ;;
+            -cn | --cluster-name )                shift
+                                                  KIND_CLUSTER_NAME=$1
+                                                  # Setup KUBECONFIG
+                                                  set_default_params
+                                                  ;;
+            -dns | --enable-dnsnameresolver )     OVN_ENABLE_DNSNAMERESOLVER=true
+                                                  ;;
+            -ce | --enable-central )              echo "WARNING: --enable-central is deprecated. OVN Central (Legacy Architecture) will be removed in a future release." >&2
+                                                  OVN_ENABLE_INTERCONNECT=false
+                                                  CENTRAL_ARG_PROVIDED=true
+                                                  ;;
+            --allow-icmp-netpol )                 OVN_ALLOW_ICMP_NETPOL=true
+                                                  ;;
+            -ic | --enable-interconnect )         OVN_ENABLE_INTERCONNECT=true
+                                                  IC_ARG_PROVIDED=true
+                                                  ;;
+            -npz | --nodes-per-zone )             shift
+                                                  if ! [[ "$1" =~ ^[0-9]+$ ]]; then
+                                                      echo "Invalid num-nodes-per-zone: $1"
+                                                      usage
+                                                      exit 1
+                                                  fi
+                                                  KIND_NUM_NODES_PER_ZONE=$1
+                                                  ;;
+            -mps| --multi-pod-subnet )            MULTI_POD_SUBNET=true
+                                                  ;;
+            -mip | --metrics-ip ) shift
+                                                  METRICS_IP="$1"
+                                                  ;;
+            -mtu )                                shift
+                                                  OVN_MTU=$1
+                                                  ;;
+            --enable-coredumps )                  ENABLE_COREDUMPS=true
+                                                  ;;
+            * )                                   usage
+                                                  exit 1
         esac
         shift
     done
+
+    if [[ -n "${CENTRAL_ARG_PROVIDED:-}" && -n "${IC_ARG_PROVIDED:-}" ]]; then
+      echo "Cannot specify both --enable-central and --enable-interconnect" >&2
+      exit 1
+    fi
 }
 
 print_params() {
@@ -199,6 +255,7 @@ print_params() {
      echo ""
      echo "KIND_CONFIG_FILE = $KIND_CONFIG"
      echo "KUBECONFIG = $KUBECONFIG"
+     echo "OCI_BIN = $OCI_BIN"
      echo "KIND_INSTALL_INGRESS = $KIND_INSTALL_INGRESS"
      echo "KIND_INSTALL_METALLB = $KIND_INSTALL_METALLB"
      echo "KIND_INSTALL_PLUGINS = $KIND_INSTALL_PLUGINS"
@@ -211,11 +268,29 @@ print_params() {
      echo "KIND_CLUSTER_NAME = $KIND_CLUSTER_NAME"
      echo "KIND_REMOVE_TAINT = $KIND_REMOVE_TAINT"
      echo "ENABLE_MULTI_NET = $ENABLE_MULTI_NET"
+     echo "ENABLE_NETWORK_SEGMENTATION = $ENABLE_NETWORK_SEGMENTATION"
+     echo "ENABLE_NETWORK_CONNECT = $ENABLE_NETWORK_CONNECT"
+     echo "ENABLE_PRE_CONF_UDN_ADDR = $ENABLE_PRE_CONF_UDN_ADDR"
+     echo "ENABLE_ROUTE_ADVERTISEMENTS = $ENABLE_ROUTE_ADVERTISEMENTS"
+     echo "ENABLE_EVPN = $ENABLE_EVPN"
+     echo "ADVERTISE_DEFAULT_NETWORK = $ADVERTISE_DEFAULT_NETWORK"
+     echo "ADVERTISED_UDN_ISOLATION_MODE = $ADVERTISED_UDN_ISOLATION_MODE"
+     echo "OVN_NETWORK_QOS_ENABLE = $OVN_NETWORK_QOS_ENABLE"
+     echo "ENABLE_NO_OVERLAY = $ENABLE_NO_OVERLAY"
+     echo "ENABLE_NO_OVERLAY_OUTBOUND_SNAT = $ENABLE_NO_OVERLAY_OUTBOUND_SNAT"
+     echo "ENABLE_NO_OVERLAY_MANAGED_ROUTING = $ENABLE_NO_OVERLAY_MANAGED_ROUTING"
+     echo "OVN_MTU = $OVN_MTU"
      echo "OVN_IMAGE = $OVN_IMAGE"
+     echo "OVN_REPO = $OVN_REPO"
+     echo "OVN_GITREF = $OVN_GITREF"
      echo "KIND_NUM_MASTER = $KIND_NUM_MASTER"
      echo "KIND_NUM_WORKER = $KIND_NUM_WORKER"
      echo "OVN_ENABLE_DNSNAMERESOLVER= $OVN_ENABLE_DNSNAMERESOLVER"
+     echo "MULTI_POD_SUBNET= $MULTI_POD_SUBNET"
+     echo "OVN_ALLOW_ICMP_NETPOL= $OVN_ALLOW_ICMP_NETPOL"
      echo "OVN_ENABLE_INTERCONNECT = $OVN_ENABLE_INTERCONNECT"
+     echo "DYNAMIC_UDN_ALLOCATION = $DYNAMIC_UDN_ALLOCATION"
+     echo "DYNAMIC_UDN_GRACE_PERIOD =  $DYNAMIC_UDN_GRACE_PERIOD"
      if [[ $OVN_ENABLE_INTERCONNECT == true ]]; then
        echo "KIND_NUM_NODES_PER_ZONE = $KIND_NUM_NODES_PER_ZONE"
        if [ "${KIND_NUM_NODES_PER_ZONE}" -gt 1 ] && [ "${OVN_ENABLE_OVNKUBE_IDENTITY}" = "true" ]; then
@@ -227,15 +302,11 @@ print_params() {
 }
 
 check_dependencies() {
-    for cmd in $OCI_BIN kubectl kind helm go ; do \
-         if ! command_exists $cmd ; then
-           2&>1 echo "Dependency not met: $cmd"
-           exit 1
-        fi
-    done
-
-    # check for currently unsupported features
-    [ "${KIND_IPV6_SUPPORT}" == "true" ] && { &>1 echo "Fatal: KIND_IPV6_SUPPORT support not implemented yet"; exit 1; } ||:
+  check_common_dependencies
+  if ! command_exists helm ; then
+    echo "'helm' not found, exiting"
+    exit 1
+  fi
 }
 
 helm_prereqs() {
@@ -243,107 +314,6 @@ helm_prereqs() {
     sudo sysctl fs.inotify.max_user_watches=524288
     # increase fs.inotify.max_user_instances
     sudo sysctl fs.inotify.max_user_instances=512
-}
-
-build_ovn_image() {
-    if [ "${SKIP_OVN_IMAGE_REBUILD}" == "true" ]; then
-      echo "Explicitly instructed not to rebuild ovn image: ${OVN_IMAGE}"
-      return
-    fi
-
-    # Build ovn image
-    pushd ${DIR}/../go-controller
-    make
-    popd
-
-    # Build ovn kube image
-    pushd ${DIR}/../dist/images
-    # Find all built executables, but ignore the 'windows' directory if it exists
-    find ../../go-controller/_output/go/bin/ -maxdepth 1 -type f -exec cp -f {} . \;
-    echo "ref: $(git rev-parse  --symbolic-full-name HEAD)  commit: $(git rev-parse  HEAD)" > git_info
-    $OCI_BIN build -t "${OVN_IMAGE}" -f Dockerfile.fedora .
-    popd
-}
-
-get_image() {
-    local image_and_tag="${1:-$OVN_IMAGE}"  # Use $1 if provided, otherwise use $OVN_IMAGE
-    local image="${image_and_tag%%:*}"  # Extract everything before the first colon
-    echo "$image"
-}
-
-get_tag() {
-    local image_and_tag="${1:-$OVN_IMAGE}"  # Use $1 if provided, otherwise use $OVN_IMAGE
-    local tag="${image_and_tag##*:}"  # Extract everything after the last colon
-    echo "$tag"
-}
-
-create_kind_cluster() {
-  [ -n "${KIND_CONFIG}" ] || {
-    KIND_CONFIG='/tmp/kind.yaml'
-
-    # Start of the kind configuration
-    cat <<EOT > /tmp/kind.yaml
-kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-nodes:
-- role: control-plane
-  kubeadmConfigPatches:
-  - |
-    kind: InitConfiguration
-    nodeRegistration:
-      kubeletExtraArgs:
-        node-labels: "ingress-ready=true"
-        authorization-mode: "AlwaysAllow"
-EOT
-  }
-
-    # Add control-plane nodes based on OVN_HA status. If there are 2 or more worker nodes, use
-    # 2 of them them to host databases instead of creating additional control plane nodes.
-    if [ "$OVN_HA" == true ] && [ "$KIND_NUM_WORKER" -lt 2 ]; then
-        for i in {2..3}; do  # Have 3 control-plane nodes for HA
-            echo "- role: control-plane" >> /tmp/kind.yaml
-        done
-    fi
-
-    # Add worker nodes based on KIND_NUM_WORKER
-    for i in $(seq 1 $KIND_NUM_WORKER); do
-        echo "- role: worker" >> /tmp/kind.yaml
-    done
-
-    # Add networking configuration
-    cat <<EOT >> /tmp/kind.yaml
-networking:
-  disableDefaultCNI: true
-  kubeProxyMode: none
-  podSubnet: $NET_CIDR_IPV4
-  serviceSubnet: $SVC_CIDR_IPV4
-EOT
-
-    kind delete clusters $KIND_CLUSTER_NAME ||:
-    kind create cluster --name $KIND_CLUSTER_NAME --config "${KIND_CONFIG}" --retain
-    kind load docker-image --name $KIND_CLUSTER_NAME $OVN_IMAGE
-
-    # When using HA, label nodes to host db.
-    if [ "$OVN_HA" == true ]; then
-      kubectl label nodes k8s.ovn.org/ovnkube-db=true --overwrite \
-              -l node-role.kubernetes.io/control-plane
-      if [ "$KIND_NUM_WORKER" -ge 2 ]; then
-        for n in ovn-worker ovn-worker2; do
-            # We want OVN HA not Kubernetes HA
-            # leverage the kubeadm well-known label node-role.kubernetes.io/control-plane=
-            # to choose the nodes where ovn master components will be placed
-            kubectl label node "$n" k8s.ovn.org/ovnkube-db=true node-role.kubernetes.io/control-plane="" --overwrite
-        done
-      fi
-    fi
-
-    # Remove taint, so control-plane nodes can also schedule regular pods
-    if [ "$KIND_REMOVE_TAINT" == true ]; then
-      kubectl taint node "$n" node-role.kubernetes.io/master:NoSchedule- \
-              -l node-role.kubernetes.io/control-plane ||:
-      kubectl taint node "$n" node-role.kubernetes.io/control-plane:NoSchedule- \
-              -l node-role.kubernetes.io/control-plane ||:
-    fi
 }
 
 label_ovn_single_node_zones() {
@@ -376,45 +346,63 @@ label_ovn_multiple_nodes_zones() {
 
 create_ovn_kubernetes() {
     cd ${DIR}/../helm/ovn-kubernetes
-    MASTER_REPLICAS=$(kubectl get node -l node-role.kubernetes.io/control-plane --no-headers | wc -l)
     if [[ $KIND_NUM_NODES_PER_ZONE == 1 ]]; then
       label_ovn_single_node_zones
       value_file="values-single-node-zone.yaml"
       ovnkube_db_options=""
-    elif [[ $KIND_NUM_NODES_PER_ZONE > 1 ]]; then
+    elif [[ $KIND_NUM_NODES_PER_ZONE -gt 1 ]]; then
       label_ovn_multiple_nodes_zones
       value_file="values-multi-node-zone.yaml"
       ovnkube_db_options=""
     else
+      label_ovn_ha
       value_file="values-no-ic.yaml"
       ovnkube_db_options="--set tags.ovnkube-db-raft=$(if [ "${OVN_HA}" == "true" ]; then echo "true"; else echo "false"; fi) \
                           --set tags.ovnkube-db=$(if [ "${OVN_HA}" == "false" ]; then echo "true"; else echo "false"; fi)"
     fi
+    MASTER_REPLICAS=$(kubectl get node -l node-role.kubernetes.io/control-plane --no-headers | wc -l)
     echo "value_file=${value_file}"
-    helm install ovn-kubernetes . -f ${value_file} \
+    # For multi-pod-subnet case, NET_CIDR_IPV4 is a list of CIDRs separated by comma.
+    # When Helm encounters a comma within a string value in a --set argument, it attempts to parse the comma as a separator
+    # for multiple values (like a list or a map), not as part of a single string value.
+    set -x
+    ESCAPED_NET_CIDR_IPV4="${NET_CIDR_IPV4//,/\\,}"
+    cmd=$(cat <<EOF
+helm install ovn-kubernetes . -f "${value_file}" \
           --set k8sAPIServer=${API_URL} \
-          --set podNetwork="${NET_CIDR_IPV4}/24" \
+          --set podNetwork="${ESCAPED_NET_CIDR_IPV4}" \
           --set serviceNetwork=${SVC_CIDR_IPV4} \
-          --set ovnkube-identity.replicas=${MASTER_REPLICAS} \
+          --set mtu=${OVN_MTU} \
           --set ovnkube-master.replicas=${MASTER_REPLICAS} \
-          --set global.image.repository=$(get_image) \
-          --set global.image.tag=$(get_tag) \
+          --set global.image.repository=${OVN_IMAGE%%:*} \
+          --set global.image.tag=${OVN_IMAGE##*:} \
           --set global.enableAdminNetworkPolicy=true \
           --set global.enableMulticast=$(if [ "${OVN_MULTICAST_ENABLE}" == "true" ]; then echo "true"; else echo "false"; fi) \
           --set global.enableMultiNetwork=$(if [ "${ENABLE_MULTI_NET}" == "true" ]; then echo "true"; else echo "false"; fi) \
+          --set global.enableNetworkSegmentation=$(if [ "${ENABLE_NETWORK_SEGMENTATION}" == "true" ]; then echo "true"; else echo "false"; fi) \
+          --set global.enableNetworkConnect=$(if [ "${ENABLE_NETWORK_CONNECT}" == "true" ]; then echo "true"; else echo "false"; fi) \
+          --set global.enableDynamicUDNAllocation=$(if [ "${DYNAMIC_UDN_ALLOCATION}" == "true" ]; then echo "true"; else echo "false"; fi) \
+          $( [ -n "$DYNAMIC_UDN_GRACE_PERIOD" ] && echo "--set global.dynamicUDNGracePeriod=$DYNAMIC_UDN_GRACE_PERIOD" ) \
+          --set global.enablePreconfiguredUDNAddresses=$(if [ "${ENABLE_PRE_CONF_UDN_ADDR}" == "true" ]; then echo "true"; else echo "false"; fi) \
+          --set global.enableRouteAdvertisements=$(if [ "${ENABLE_ROUTE_ADVERTISEMENTS}" == "true" ]; then echo "true"; else echo "false"; fi) \
+          --set global.enableEVPN=$(if [ "${ENABLE_EVPN}" == "true" ]; then echo "true"; else echo "false"; fi) \
+          --set global.advertiseDefaultNetwork=$(if [ "${ADVERTISE_DEFAULT_NETWORK}" == "true" ]; then echo "true"; else echo "false"; fi) \
+          --set global.advertisedUDNIsolationMode="${ADVERTISED_UDN_ISOLATION_MODE}" \
           --set global.enableHybridOverlay=$(if [ "${OVN_HYBRID_OVERLAY_ENABLE}" == "true" ]; then echo "true"; else echo "false"; fi) \
           --set global.enableObservability=$(if [ "${OVN_OBSERV_ENABLE}" == "true" ]; then echo "true"; else echo "false"; fi) \
-        --set global.emptyLbEvents=$(if [ "${OVN_EMPTY_LB_EVENTS}" == "true" ]; then echo "true"; else echo "false"; fi) \
+          --set global.emptyLbEvents=$(if [ "${OVN_EMPTY_LB_EVENTS}" == "true" ]; then echo "true"; else echo "false"; fi) \
           --set global.enableDNSNameResolver=$(if [ "${OVN_ENABLE_DNSNAMERESOLVER}" == "true" ]; then echo "true"; else echo "false"; fi) \
+          --set global.enableNetworkQos=$(if [ "${OVN_NETWORK_QOS_ENABLE}" == "true" ]; then echo "true"; else echo "false"; fi) \
+          --set global.enableNoOverlay=$(if [ "${ENABLE_NO_OVERLAY}" == "true" ]; then echo "true"; else echo "false"; fi) \
+          --set global.enableNoOverlaySnat=$(if [ "${ENABLE_NO_OVERLAY_OUTBOUND_SNAT}" == "true" ]; then echo "true"; else echo "false"; fi) \
+          --set global.enableNoOverlayManagedRouting=$(if [ "${ENABLE_NO_OVERLAY_MANAGED_ROUTING}" == "true" ]; then echo "true"; else echo "false"; fi) \
+          --set global.enableCoredumps=$(if [ "${ENABLE_COREDUMPS}" == "true" ]; then echo "true"; else echo "false"; fi) \
+          --set global.allowICMPNetworkPolicy=$(if [ "${OVN_ALLOW_ICMP_NETPOL}" == "true" ]; then echo "true"; else echo "false"; fi) \
           ${ovnkube_db_options}
-}
-
-delete() {
-  if [ "$KIND_INSTALL_METALLB" == true ]; then
-    destroy_metallb
-  fi
-  helm uninstall ovn-kubernetes && sleep 5 ||:
-  kind delete cluster --name "${KIND_CLUSTER_NAME:-ovn}"
+EOF
+       )
+    echo "${cmd}"
+    eval "${cmd}"
 }
 
 install_online_ovn_kubernetes_crds() {
@@ -430,7 +418,11 @@ print_params
 helm_prereqs
 build_ovn_image
 create_kind_cluster
+if [ "$ENABLE_COREDUMPS" == true ]; then
+  setup_coredumps
+fi
 detect_apiserver_url
+install_ovn_image
 docker_disable_ipv6
 coredns_patch
 if [ "$OVN_ENABLE_DNSNAMERESOLVER" == true ]; then
@@ -440,6 +432,21 @@ if [ "$OVN_ENABLE_DNSNAMERESOLVER" == true ]; then
     update_clusterrole_coredns
     add_ocp_dnsnameresolver_to_coredns_config
     update_coredns_deployment_image
+fi
+if [ "$ENABLE_ROUTE_ADVERTISEMENTS" == true ]; then
+  frr_port=0
+  if [ "$ENABLE_NO_OVERLAY_MANAGED_ROUTING" == true ]; then
+    # Enable bgp port listening on node, required for managed mode. FRR will listen on port 179 to receive BGP updates from other nodes.
+    frr_port=179
+  else
+    # external FRR is required for unmanaged mode
+    deploy_frr_external_container
+    deploy_bgp_external_server
+  fi
+  install_frr_k8s $frr_port
+fi
+if [ "$KIND_REMOVE_TAINT" == true ]; then
+  remove_no_schedule_taint
 fi
 create_ovn_kubernetes
 
@@ -475,3 +482,13 @@ fi
 if [ "$KIND_INSTALL_KUBEVIRT" == true ]; then
   install_kubevirt
 fi
+
+if [ "$ENABLE_ROUTE_ADVERTISEMENTS" == true ]; then
+  # wait for frr-k8s to be ready
+  wait_for_frr_k8s
+  if [ "$ENABLE_NO_OVERLAY_MANAGED_ROUTING" != true ]; then
+    configure_frr_k8s
+  fi
+fi
+
+interconnect_arg_check
